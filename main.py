@@ -41,6 +41,8 @@ def healthcheck() -> None:
                     "memory_used": gpu.memory_used,
                     "memory_total": gpu.memory_total,
                     "utilization": gpu.utilization,
+                    "temperature": gpu.temperature,
+                    "power_draw": gpu.power_draw,
                 }
             )
 
