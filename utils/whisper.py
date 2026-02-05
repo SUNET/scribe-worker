@@ -406,7 +406,9 @@ class WhisperAudioTranscriber:
         Perform speaker diarization on the transcribed audio.
         """
 
-        match int(self.__speakers):
+        speakers = int(self.__speakers)
+
+        match speakers:
             case 0:
                 min_speakers = None
                 max_speakers = None
@@ -425,14 +427,15 @@ class WhisperAudioTranscriber:
             self.__logger.info("Diarization pipeline already initialized.")
 
         if not self.__diarization_pipeline:
-            raise Exception(
-                "Diarization pipeline not initialized. Please provide a HuggingFace token."
-            )
+            self.__logger.error("Diarization pipeline initialization failed.")
+            raise Exception("Diarization pipeline is not available.")
 
         if not self.__result:
             raise Exception(
                 "Transcription result is not available. Please transcribe first."
             )
+
+        self.__logger.info("Running diarization pipeline...")
 
         diarization = self.__diarization_pipeline(
             self.__audio_path,
@@ -440,6 +443,7 @@ class WhisperAudioTranscriber:
             min_speakers=min_speakers,
             max_speakers=max_speakers,
         )
+
         aligned_segments = self.__align_speakers(self.__result["chunks"], diarization)
 
         return {

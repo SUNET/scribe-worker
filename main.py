@@ -11,8 +11,8 @@ from time import sleep
 from utils.args import parse_arguments
 from utils.log import get_fileno, get_logger
 from utils.settings import get_settings
-from utils.whisper import diarization_init
 
+mp.set_start_method("spawn", force=True)
 settings = get_settings()
 logger = get_logger()
 foreground, pidfile, zap, _, _, _, no_healthcheck = parse_arguments()
@@ -71,13 +71,18 @@ def mainloop(worker_id: int) -> None:
     Main function to fetch jobs and process them.
     """
 
-    logger.info(f"Starting worker process {worker_id}...")
+    logger.info(f"[{worker_id}] Starting worker process...")
 
     api_url = f"{settings.API_BACKEND_URL}/api/{settings.API_VERSION}/job"
-    drz = diarization_init(settings.HF_TOKEN)
 
     while True:
-        sleep(randint(10, 60))
+        sleep_time = randint(10, 60)
+
+        logger.debug(
+            f"[{worker_id}] Sleeping for {sleep_time} seconds before fetching a new job..."
+        )
+
+        sleep(sleep_time)
 
         with TranscriptionJob(
             logger,
@@ -85,7 +90,6 @@ def mainloop(worker_id: int) -> None:
             settings.FILE_STORAGE_DIR,
             hf_whisper=settings.HF_WHISPER,
             hf_token=settings.HF_TOKEN,
-            diarization_object=drz,
         ) as job:
             job.start()
 

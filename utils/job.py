@@ -33,7 +33,6 @@ class TranscriptionJob:
         api_file_storage_dir: str,
         hf_whisper: Optional[bool] = False,
         hf_token: Optional[str] = None,
-        diarization_object: Optional[object] = None,
     ):
         self.logger = logger
         self.api_url = api_url
@@ -41,7 +40,6 @@ class TranscriptionJob:
         self.hf_whisper = hf_whisper
         self.hf_token = hf_token
         self.speakers = 0
-        self.diarization_object = diarization_object
 
     def __enter__(self) -> "TranscriptionJob":
         """
@@ -177,7 +175,6 @@ class TranscriptionJob:
             language=self.language,
             speakers=self.speakers,
             hf_token=self.hf_token,
-            diarization_object=self.diarization_object,
         )
 
         transcribed_seconds = transcriber.transcribe()
