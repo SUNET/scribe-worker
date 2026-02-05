@@ -405,6 +405,19 @@ class WhisperAudioTranscriber:
         """
         Perform speaker diarization on the transcribed audio.
         """
+
+        match int(self.__speakers):
+            case 0:
+                min_speakers = None
+                max_speakers = None
+                speakers = None
+            case 1:
+                min_speakers = 1
+                max_speakers = 2
+            case _:
+                min_speakers = speakers - 1
+                max_speakers = speakers + 1
+
         if not self.__diarization_pipeline:
             self.__logger.info("Initializing diarization pipeline...")
             self.__diarization_pipeline = diarization_init(self.__hf_token)
@@ -422,14 +435,19 @@ class WhisperAudioTranscriber:
             )
 
         diarization = self.__diarization_pipeline(
-            self.__audio_path, num_speakers=int(self.__speakers)
+            self.__audio_path,
+            num_speakers=int(self.__speakers),
+            min_speakers=min_speakers,
+            max_speakers=max_speakers,
         )
         aligned_segments = self.__align_speakers(self.__result["chunks"], diarization)
 
         return {
             "full_transcription": self.__result["full_transcription"],
             "segments": aligned_segments,
-            "speaker_count": len(list(diarization.speaker_diarization.labels())) if diarization else 0,
+            "speaker_count": len(list(diarization.speaker_diarization.labels()))
+            if diarization
+            else 0,
         }
 
     def __align_speakers(self, transcription_chunks, diarization) -> list:
@@ -479,7 +497,9 @@ class WhisperAudioTranscriber:
         """
         Get the speaker label for a specific time point in the diarization.
         """
-        for segment, _, speaker in diarization.speaker_diarization.itertracks(yield_label=True):
+        for segment, _, speaker in diarization.speaker_diarization.itertracks(
+            yield_label=True
+        ):
             if segment.start <= time_point <= segment.end:
                 return self.__normalize_speaker_name(speaker)
 
@@ -492,7 +512,9 @@ class WhisperAudioTranscriber:
         """
         active_speakers = set()
 
-        for segment, _, speaker in diarization.speaker_diarization.itertracks(yield_label=True):
+        for segment, _, speaker in diarization.speaker_diarization.itertracks(
+            yield_label=True
+        ):
             if not (segment.end < start_time or segment.start > end_time):
                 active_speakers.add(self.__normalize_speaker_name(speaker))
 
