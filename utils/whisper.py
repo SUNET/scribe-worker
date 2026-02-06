@@ -34,7 +34,7 @@ def diarization_init(hf_token: str) -> Optional[Pipeline]:
     device, _ = get_torch_device()
 
     return Pipeline.from_pretrained(
-        "pyannote/speaker-diarization-community-1", token=hf_token
+        "pyannote/speaker-diarization-community-1", use_auth_token=hf_token
     ).to(torch.device(device))
 
 
