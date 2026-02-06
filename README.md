@@ -25,7 +25,7 @@ Worker service for the SUNET transcription service (Sunet Scribe).
 
 ```bash
 git clone <repository-url>
-cd transcribe-worker
+cd scribe-worker
 uv sync
 ```
 
@@ -72,6 +72,22 @@ SSL_KEYFILE=<Path to SSL key>
 ### 5. Run the Application
 
 Run in foreground mode for development:
+=======
+# Debug mode
+DEBUG=True
+
+# Backend API configuration
+API_BACKEND_URL="http://localhost:8000"
+API_VERSION="v1"
+
+# Worker configuration
+WORKERS=2
+WHISPER_CPP_PATH=<Path to whisper.cpp>
+FILE_STORAGE_DIR=<Your file storage directory>
+```
+
+### 5. Run the Worker
+>>>>>>> main
 
 ```bash
 uv run main.py --foreground --debug
@@ -100,30 +116,24 @@ uv run main.py --zap
 | `--zap` | Stop a running daemon |
 | `--no-healthcheck` | Disable health check reporting |
 
+
 ## Docker
 
 Build and run with Docker:
 
 ```bash
-docker build -t transcribe-worker .
-docker run --env-file .env transcribe-worker
+docker build -t scribe-worker .
+docker run --env-file .env scribe-worker
 ```
 
 ## Project Structure
 
 ```
-transcribe-worker/
-├── main.py              # Application entry point
-├── download_models.sh   # Script to download Whisper models
-├── models/              # Whisper model files
+scribe-worker/
+├── main.py              # Worker entry point
 ├── utils/               # Utility modules
-│   ├── args.py          # Command line argument parsing
-│   ├── inference.py     # Inference client
-│   ├── job.py           # Transcription job handling
-│   ├── log.py           # Logging configuration
-│   ├── settings.py      # Application settings
-│   └── whisper.py       # Whisper integration
-└── Dockerfile           # Docker build configuration
+├── models/              # Whisper model files
+└── downloaded/          # Downloaded files for processing
 ```
 
 ## License
