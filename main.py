@@ -15,11 +15,13 @@ from utils.settings import get_settings
 mp.set_start_method("spawn", force=True)
 settings = get_settings()
 logger = get_logger()
-foreground, pidfile, zap, _, _, _, no_healthcheck = parse_arguments()
+foreground, pidfile, zap, _, _, _, no_healthcheck, mode = parse_arguments()
 
 if not zap:
-    from utils.job import TranscriptionJob
-    from utils.inference import start_inference_client
+    if mode in ("all", "transcription"):
+        from utils.job import TranscriptionJob
+    if mode in ("all", "inference"):
+        from utils.inference import start_inference_client
 
 
 def healthcheck() -> None:
@@ -96,19 +98,22 @@ def mainloop(worker_id: int) -> None:
 
 
 def main() -> None:
-    logger.info("Starting transcription service...")
+    logger.info(f"Starting transcription service in '{mode}' mode...")
 
     if no_healthcheck:
         processes = []
     else:
         processes = [mp.Process(target=healthcheck)]
 
-    # Add inference client process
-    processes.append(mp.Process(target=start_inference_client))
+    # Add inference client process if mode allows
+    if mode in ("all", "inference"):
+        processes.append(mp.Process(target=start_inference_client))
 
-    processes += [
-        mp.Process(target=mainloop, args=(i,)) for i in range(settings.WORKERS)
-    ]
+    # Add transcription workers if mode allows
+    if mode in ("all", "transcription"):
+        processes += [
+            mp.Process(target=mainloop, args=(i,)) for i in range(settings.WORKERS)
+        ]
 
     for p in processes:
         p.start()

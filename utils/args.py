@@ -47,6 +47,14 @@ def parse_arguments() -> tuple:
         help="Disable healthcheck thread.",
     )
 
+    parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["all", "inference", "transcription"],
+        default="all",
+        help="Run mode: 'all' (default), 'inference' only, or 'transcription' only.",
+    )
+
     args = parser.parse_args()
 
     return (
@@ -57,4 +65,5 @@ def parse_arguments() -> tuple:
         args.debug,
         args.logfile,
         args.no_healthcheck,
+        args.mode,
     )
