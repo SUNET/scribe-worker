@@ -31,15 +31,14 @@ class InferenceClient:
         )
         ws_url = f"{ws_url}/api/{settings.API_VERSION}/job/inference"
 
-        # Only use SSL if connecting to wss:// and certificates are configured
+        # For wss://, use SSL context with client certs if configured, otherwise use default SSL
         ssl_context = None
-        if (
-            ws_url.startswith("wss://")
-            and settings.SSL_CERTFILE
-            and settings.SSL_KEYFILE
-        ):
-            ssl_context = ssl.create_default_context()
-            ssl_context.load_cert_chain(settings.SSL_CERTFILE, settings.SSL_KEYFILE)
+        if ws_url.startswith("wss://"):
+            if settings.SSL_CERTFILE and settings.SSL_KEYFILE:
+                ssl_context = ssl.create_default_context()
+                ssl_context.load_cert_chain(settings.SSL_CERTFILE, settings.SSL_KEYFILE)
+            else:
+                ssl_context = True  # Use default SSL context without client certificates
 
         log.info(f"Connecting to inference websocket: {ws_url}")
         self.ws = await websockets.connect(
