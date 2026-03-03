@@ -1,9 +1,12 @@
+import io
 import json
 import logging
+import numpy as np
 import os
 import subprocess
+import tempfile
 import torch
-import uuid
+import wave
 
 from pathlib import Path
 from pyannote.audio import Pipeline
@@ -43,13 +46,14 @@ class WhisperAudioTranscriber:
         self,
         logger: logging.Logger,
         backend: str,
-        audio_path: str,
+        audio_path: Optional[str] = None,
         model_name: Optional[str] = "KBLab/kb-whisper-base",
         language: Optional[str] = "sv",
         speakers: Optional[int] = 0,
         hf_token: Optional[str] = None,
         whisper_cpp_path: Optional[str] = settings.WHISPER_CPP_PATH,
         diarization_object: Optional[Pipeline] = None,
+        audio_data: Optional[bytes] = None,
     ) -> None:
         """
         Initializes the WhisperAudioTranscriber with the audio
@@ -57,6 +61,7 @@ class WhisperAudioTranscriber:
         """
 
         self.__audio_path = audio_path
+        self.__audio_data = audio_data
         self.__model_name = model_name
         self.__hf_token = hf_token
         self.__device, self.__torch_dtype = get_torch_device()
@@ -96,6 +101,29 @@ class WhisperAudioTranscriber:
             return_timestamps=True,
         )
 
+    def __decode_wav_bytes(self, wav_bytes: bytes) -> tuple:
+        """
+        Decode WAV bytes into a numpy float32 array and sample rate.
+        Returns (numpy_array_float32, sample_rate).
+        """
+        with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+            sample_rate = wf.getframerate()
+            n_frames = wf.getnframes()
+            sample_width = wf.getsampwidth()
+            raw_data = wf.readframes(n_frames)
+
+        if sample_width == 2:
+            dtype = np.int16
+        elif sample_width == 4:
+            dtype = np.int32
+        else:
+            raise ValueError(f"Unsupported sample width: {sample_width}")
+
+        audio_array = np.frombuffer(raw_data, dtype=dtype).astype(np.float32)
+        audio_array /= np.iinfo(dtype).max
+
+        return audio_array, sample_rate
+
     def __seconds_to_srt_time(self, seconds) -> str:
         """
         Convert seconds (float or string) to SRT timestamp format
@@ -107,17 +135,6 @@ class WhisperAudioTranscriber:
         hours, remainder = divmod(total_seconds, 3600)
         minutes, secs = divmod(remainder, 60)
         return f"{hours:02}:{minutes:02}:{secs:02},{millis:03}"
-
-    def __transcribe_hf(self, filepath: str) -> list:
-        """
-        Transcribe the audio file using the Whisper model.
-        """
-        self.__result = self.pipe(
-            filepath,
-            generate_kwargs={"task": "transcribe", "language": self.__language},
-        )
-
-        return self.__result
 
     def __run_cmd(self, command: list) -> bool:
         """
@@ -339,38 +356,61 @@ class WhisperAudioTranscriber:
 
         return converted
 
-    def __transcribe_hf(self, filepath: str) -> dict:
+    def __transcribe_hf(self, filepath: Optional[str] = None) -> dict:
+        if self.__audio_data:
+            audio_array, sample_rate = self.__decode_wav_bytes(self.__audio_data)
+            audio_input = {"raw": audio_array, "sampling_rate": sample_rate}
+        else:
+            audio_input = filepath
+
         result = self.pipe(
-            filepath,
+            audio_input,
             generate_kwargs={"task": "transcribe", "language": self.__language},
         )
 
         return self.__process_transcription(result.get("chunks", []), source="hf")
 
-    def __transcribe_cpp(self, filepath: str) -> dict:
-        temp_filename = str(uuid.uuid4())
-        command = [
-            self.__whisper_cpp_path,
-            "-l",
-            self.__language,
-            "-ojf",
-            "-of",
-            str(Path(settings.FILE_STORAGE_DIR) / temp_filename),
-            "-m",
-            self.__model_name,
-            "-sns",
-            "-fa",
-            "-f",
-            filepath,
-        ]
+    def __transcribe_cpp(self, filepath: Optional[str] = None) -> dict:
+        temp_wav_path = None
+        temp_dir = None
+        try:
+            if self.__audio_data:
+                fd, temp_wav_path = tempfile.mkstemp(suffix=".wav")
+                os.write(fd, self.__audio_data)
+                os.close(fd)
+                wav_filepath = temp_wav_path
+            else:
+                wav_filepath = filepath
 
-        if not self.__run_cmd(command):
-            raise Exception("Failed to run whisper.cpp command")
+            temp_dir = tempfile.mkdtemp()
+            temp_output_prefix = str(Path(temp_dir) / "output")
+            command = [
+                self.__whisper_cpp_path,
+                "-l",
+                self.__language,
+                "-ojf",
+                "-of",
+                temp_output_prefix,
+                "-m",
+                self.__model_name,
+                "-sns",
+                "-fa",
+                "-f",
+                wav_filepath,
+            ]
 
-        json_path = Path(settings.FILE_STORAGE_DIR) / f"{temp_filename}.json"
-        with open(json_path, "rb") as f:
-            json_str = f.read()
-        os.remove(json_path)
+            if not self.__run_cmd(command):
+                raise Exception("Failed to run whisper.cpp command")
+
+            json_path = f"{temp_output_prefix}.json"
+            with open(json_path, "rb") as f:
+                json_str = f.read()
+        finally:
+            if temp_wav_path and os.path.exists(temp_wav_path):
+                os.remove(temp_wav_path)
+            if temp_dir and os.path.exists(temp_dir):
+                import shutil
+                shutil.rmtree(temp_dir)
 
         result = json.loads(json_str.decode("iso-8859-1"))
         return self.__process_transcription(
@@ -381,8 +421,13 @@ class WhisperAudioTranscriber:
         """
         Transcribe the audio file and return the transcription result.
         """
-        if not os.path.exists(self.__audio_path):
-            raise FileNotFoundError(f"Audio file {self.__audio_path} does not exist.")
+        if not self.__audio_data and self.__audio_path:
+            if not os.path.exists(self.__audio_path):
+                raise FileNotFoundError(
+                    f"Audio file {self.__audio_path} does not exist."
+                )
+        elif not self.__audio_data and not self.__audio_path:
+            raise ValueError("Either audio_data or audio_path must be provided.")
 
         try:
             match self.__backend:
@@ -437,8 +482,15 @@ class WhisperAudioTranscriber:
 
         self.__logger.info("Running diarization pipeline...")
 
+        if self.__audio_data:
+            audio_array, sample_rate = self.__decode_wav_bytes(self.__audio_data)
+            waveform = torch.from_numpy(audio_array).unsqueeze(0)
+            audio_input = {"waveform": waveform, "sample_rate": sample_rate}
+        else:
+            audio_input = self.__audio_path
+
         diarization = self.__diarization_pipeline(
-            self.__audio_path,
+            audio_input,
             num_speakers=int(self.__speakers),
             min_speakers=min_speakers,
             max_speakers=max_speakers,

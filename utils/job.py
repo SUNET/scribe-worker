@@ -1,7 +1,9 @@
+import io
 import json
 import logging
 import requests
 import subprocess
+import wave
 
 from enum import Enum
 from pathlib import Path
@@ -40,6 +42,7 @@ class TranscriptionJob:
         self.hf_whisper = hf_whisper
         self.hf_token = hf_token
         self.speakers = 0
+        self.file_data = None
 
     def __enter__(self) -> "TranscriptionJob":
         """
@@ -52,6 +55,7 @@ class TranscriptionJob:
         self.model = None
         self.filename = None
         self.speakers = 0
+        self.file_data = None
 
         # Ensure the file storage directory exists
         Path(self.api_file_storage_dir).mkdir(parents=True, exist_ok=True)
@@ -142,6 +146,8 @@ class TranscriptionJob:
             )
             return False
 
+        self.file_data = None
+
         self.logger.debug("Uploading results to backend")
         if not self.__put_result():
             self.logger.error("File upload failed")
@@ -170,7 +176,7 @@ class TranscriptionJob:
         transcriber = WhisperAudioTranscriber(
             self.logger,
             "hf" if self.hf_whisper else "cpp",
-            str(Path(self.api_file_storage_dir) / f"{self.filename}.wav"),
+            audio_data=self.wav_data,
             model_name=self.model,
             language=self.language,
             speakers=self.speakers,
@@ -188,6 +194,8 @@ class TranscriptionJob:
             drz = transcriber.diarization()
         else:
             drz = None
+
+        self.wav_data = None
 
         with open(
             Path(self.api_file_storage_dir) / f"{self.filename}.srt", "w"
@@ -225,6 +233,34 @@ class TranscriptionJob:
 
         return True
 
+    def __run_cmd_pipe(self, command: list, input_data: bytes) -> bool:
+        """
+        Run a command using subprocess.Popen, piping input_data to stdin.
+        """
+        try:
+            command_str = " ".join(command)
+            self.logger.debug(f"Executing piped command: {command_str}")
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            stdout, stderr = process.communicate(input=input_data)
+
+            if process.returncode != 0:
+                raise subprocess.CalledProcessError(
+                    returncode=process.returncode,
+                    cmd=command_str,
+                    output=None,
+                    stderr=stderr.decode(),
+                )
+        except Exception as e:
+            self.logger.error(f"Error when executing piped command: {e}")
+            raise e
+
+        return stdout
+
     def __downscale_file(self) -> bool:
         """
         Downscale videos to a smaller size.
@@ -234,7 +270,7 @@ class TranscriptionJob:
         command = [
             settings.FFMPEG_PATH,
             "-i",
-            str(Path(self.api_file_storage_dir) / self.filename),
+            "pipe:0",
             "-vf",
             "scale=-2:240:flags=lanczos",
             "-c:v",
@@ -264,42 +300,54 @@ class TranscriptionJob:
             "-ac",
             "2",
             "-movflags",
-            "+faststart",
-            str(Path(self.api_file_storage_dir) / output_filename),
+            "frag_keyframe+empty_moov+default_base_moof",
             "-y",
+            str(Path(self.api_file_storage_dir) / output_filename),
         ]
         try:
-            self.__run_cmd(command)
+            self.__run_cmd_pipe(command, self.file_data)
         except Exception as e:
             self.logger.error(f"Error during downscaling: {e}")
             return False
 
         return True
 
+    def __raw_pcm_to_wav(self, pcm_data: bytes, sample_rate: int = 16000, channels: int = 1, sample_width: int = 2) -> bytes:
+        """
+        Wrap raw PCM (s16le) data in a WAV header.
+        """
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as wf:
+            wf.setnchannels(channels)
+            wf.setsampwidth(sample_width)
+            wf.setframerate(sample_rate)
+            wf.writeframes(pcm_data)
+        return buf.getvalue()
+
     def __transcode_file(self) -> bool:
         """
         Transcode the audio file using ffmpeg.
-        The transcoded format should be 16kHz mono WAV.
+        The transcoded format should be 16kHz mono signed 16-bit PCM.
+        Raw PCM is piped to stdout (WAV format requires seeking, which
+        pipes don't support), then wrapped in a WAV header in memory.
         """
 
-        output_filename = f"{self.filename}.wav"
         command = [
             settings.FFMPEG_PATH,
             "-i",
-            str(Path(self.api_file_storage_dir) / self.filename),
+            "pipe:0",
             "-ar",
             "16000",
             "-ac",
             "1",
             "-f",
-            "wav",
-            "-y",
-            str(Path(self.api_file_storage_dir) / output_filename),
-            "-y",
+            "s16le",
+            "pipe:1",
         ]
 
         try:
-            self.__run_cmd(command)
+            pcm_data = self.__run_cmd_pipe(command, self.file_data)
+            self.wav_data = self.__raw_pcm_to_wav(pcm_data)
         except Exception as e:
             self.logger.error(f"Error during transcoding: {e}")
             return False
@@ -343,10 +391,7 @@ class TranscriptionJob:
                 self.logger.error(f"Error downloading file: {response.status_code}")
                 raise Exception("File not downloaded")
 
-            file_path = Path(self.api_file_storage_dir) / self.uuid
-
-            with open(file_path, "wb") as f:
-                f.write(response.content)
+            self.file_data = response.content
 
         except Exception as e:
             self.logger.error(f"Error downloading file: {e}")
@@ -467,10 +512,8 @@ class TranscriptionJob:
         if not self.uuid:
             return
 
-        file_path = Path(self.api_file_storage_dir) / self.uuid
-        if file_path.exists():
-            file_path.unlink()
-            self.logger.info(f"Deleted file {file_path}")
+        self.file_data = None
+        self.wav_data = None
 
         for file in Path(self.api_file_storage_dir).glob(f"{self.uuid}.*"):
             if file.exists():
