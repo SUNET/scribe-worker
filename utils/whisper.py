@@ -20,7 +20,9 @@ import json
 import logging
 import numpy as np
 import os
+import re
 import subprocess
+import tempfile
 import torch
 import wave
 
@@ -154,16 +156,20 @@ class WhisperAudioTranscriber:
         minutes, secs = divmod(remainder, 60)
         return f"{hours:02}:{minutes:02}:{secs:02},{millis:03}"
 
-    def __run_cmd(self, command: list, input_data: Optional[bytes] = None) -> Optional[bytes]:
+    def __run_cmd(
+        self, command: list, input_data: Optional[bytes] = None, pass_fds: tuple = ()
+    ) -> Optional[bytes]:
         """
         Run a command using subprocess.run.
         Optionally pipes input_data to stdin.
         Returns stdout bytes on success, None on failure.
         """
         try:
-            command_str = " ".join(command)
+            command_str = re.sub(r"/dev/fd/\d+", "<fd>", " ".join(command))
             self.__logger.debug(f"Running command: {command_str}")
-            result = subprocess.run(command, input=input_data, capture_output=True)
+            result = subprocess.run(
+                command, input=input_data, capture_output=True, pass_fds=pass_fds
+            )
 
             if result.returncode != 0:
                 raise subprocess.CalledProcessError(
@@ -390,24 +396,44 @@ class WhisperAudioTranscriber:
         return self.__process_transcription(result.get("chunks", []), source="hf")
 
     def __transcribe_cpp(self, filepath: Optional[str] = None) -> dict:
-        command = [
-            self.__whisper_cpp_path,
-            "-l",
-            self.__language,
-            "-ojf",
-            "-of",
-            "-",
-            "-m",
-            self.__model_name,
-            "-sns",
-            "-fa",
-            "-f",
-            "-" if self.__audio_data else filepath,
-        ]
+        # -of - writes JSON to stdout (via /dev/stdout).
+        # -np suppresses text output so stdout contains only JSON.
+        # Use TemporaryFile + /dev/fd/N to avoid visible files on disk.
+        temp_file = None
+        try:
+            if self.__audio_data:
+                temp_file = tempfile.TemporaryFile()
+                temp_file.write(self.__audio_data)
+                temp_file.seek(0)
+                fd = temp_file.fileno()
+                wav_filepath = f"/dev/fd/{fd}"
+                fds = (fd,)
+            else:
+                wav_filepath = filepath
+                fds = ()
 
-        json_str = self.__run_cmd(command, input_data=self.__audio_data)
-        if json_str is None:
-            raise Exception("Failed to run whisper.cpp command")
+            command = [
+                self.__whisper_cpp_path,
+                "-l",
+                self.__language,
+                "-ojf",
+                "-of",
+                "-",
+                "-np",
+                "-m",
+                self.__model_name,
+                "-sns",
+                "-fa",
+                "-f",
+                wav_filepath,
+            ]
+
+            json_str = self.__run_cmd(command, pass_fds=fds)
+            if json_str is None:
+                raise Exception("Failed to run whisper.cpp command")
+        finally:
+            if temp_file:
+                temp_file.close()
 
         result = json.loads(json_str.decode("iso-8859-1"))
         return self.__process_transcription(
