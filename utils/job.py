@@ -205,25 +205,15 @@ class TranscriptionJob:
         if transcribed_seconds is None:
             return None
 
-        srt = transcriber.subtitles()
+        self.srt_data = transcriber.subtitles()
 
         if self.output_format == "txt":
             drz = transcriber.diarization()
+            self.json_data = dict(drz) if drz else None
         else:
-            drz = None
+            self.json_data = None
 
         self.wav_data = None
-
-        with open(
-            Path(self.api_file_storage_dir) / f"{self.filename}.srt", "w"
-        ) as srt_file:
-            srt_file.write(srt)
-
-        if drz:
-            with open(
-                Path(self.api_file_storage_dir) / f"{self.filename}.json", "w"
-            ) as json_file:
-                json_file.write(json.dumps(dict(drz)))
 
         return transcribed_seconds
 
@@ -281,9 +271,9 @@ class TranscriptionJob:
     def __downscale_file(self) -> bool:
         """
         Downscale videos to a smaller size.
+        Output is captured in memory (self.mp4_data).
         """
 
-        output_filename = f"{self.filename}.mp4"
         command = [
             settings.FFMPEG_PATH,
             "-i",
@@ -318,11 +308,12 @@ class TranscriptionJob:
             "2",
             "-movflags",
             "frag_keyframe+empty_moov+default_base_moof",
-            "-y",
-            str(Path(self.api_file_storage_dir) / output_filename),
+            "-f",
+            "mp4",
+            "pipe:1",
         ]
         try:
-            self.__run_cmd_pipe(command, self.file_data)
+            self.mp4_data = self.__run_cmd_pipe(command, self.file_data)
         except Exception as e:
             self.logger.error(f"Error during downscaling: {e}")
             return False
@@ -440,15 +431,15 @@ class TranscriptionJob:
 
         return True
 
-    def __upload_mp4(self, file_path) -> bool:
+    def __upload_mp4(self, mp4_bytes: bytes) -> bool:
         """
-        Upload the MP4 file to the API broker.
+        Upload the MP4 data to the API broker.
         """
 
         try:
             response = requests.put(
                 f"{self.api_url}/{self.user_id}/{self.uuid}/file",
-                files={"file": open(file_path, "rb")},
+                files={"file": (f"{self.uuid}.mp4", io.BytesIO(mp4_bytes), "video/mp4")},
                 cert=(settings.SSL_CERTFILE, settings.SSL_KEYFILE),
             )
             response.raise_for_status()
@@ -461,47 +452,41 @@ class TranscriptionJob:
 
     def __put_result(self) -> int:
         """
-        Upload the file to the API broker.
+        Upload results to the API broker.
+        All data is uploaded from memory.
         """
         header = {
             "Content-Type": "application/json",
         }
 
-        for output_format in ["srt", "vtt", "json", "txt", "mp4"]:
+        results = {}
+        if self.srt_data:
+            results["srt"] = {"result": self.srt_data, "format": "srt"}
+        if self.json_data:
+            results["json"] = {"result": self.json_data, "format": "json"}
+
+        for output_format, json_data in results.items():
             try:
-                file_path = (
-                    Path(self.api_file_storage_dir) / f"{self.uuid}.{output_format}"
+                response = requests.put(
+                    f"{self.api_url}/{self.user_id}/{self.uuid}/result",
+                    json=json_data,
+                    headers=header,
+                    cert=(settings.SSL_CERTFILE, settings.SSL_KEYFILE),
                 )
-
-                if not file_path.exists():
-                    continue
-
-                if output_format == "mp4":
-                    self.__upload_mp4(file_path)
-                    continue
-
-                with open(file_path, "rb") as fd:
-                    data = fd.read()
-                    json_data = {}
-
-                    if output_format == "json":
-                        json_data["result"] = json.loads(data.decode("utf-8"))
-                    elif output_format == "srt":
-                        json_data["result"] = data.decode("utf-8")
-
-                    json_data["format"] = output_format
-                    response = requests.put(
-                        f"{self.api_url}/{self.user_id}/{self.uuid}/result",
-                        json=json_data,
-                        headers=header,
-                        cert=(settings.SSL_CERTFILE, settings.SSL_KEYFILE),
-                    )
-                    response.raise_for_status()
+                response.raise_for_status()
             except requests.RequestException as e:
-                self.logger.error(f"Error uploading {output_format} file: {e}")
+                self.logger.error(f"Error uploading {output_format}: {e}")
                 return False
 
-            self.logger.info(f"Uploaded {output_format} file for job {self.uuid}")
+            self.logger.info(f"Uploaded {output_format} for job {self.uuid}")
+
+        if self.mp4_data:
+            try:
+                self.__upload_mp4(self.mp4_data)
+            except Exception as e:
+                self.logger.error(f"Error uploading mp4: {e}")
+                return False
+            self.logger.info(f"Uploaded mp4 for job {self.uuid}")
 
         return True
 
@@ -531,10 +516,8 @@ class TranscriptionJob:
 
         self.file_data = None
         self.wav_data = None
-
-        for file in Path(self.api_file_storage_dir).glob(f"{self.uuid}.*"):
-            if file.exists():
-                file.unlink()
-                self.logger.info(f"Deleted file {file}")
+        self.srt_data = None
+        self.json_data = None
+        self.mp4_data = None
 
         return True
