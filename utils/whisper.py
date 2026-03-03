@@ -25,7 +25,6 @@ import tempfile
 import torch
 import wave
 
-from pathlib import Path
 from pyannote.audio import Pipeline
 from pyannote.audio.telemetry import set_telemetry_metrics
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
@@ -156,10 +155,10 @@ class WhisperAudioTranscriber:
         minutes, secs = divmod(remainder, 60)
         return f"{hours:02}:{minutes:02}:{secs:02},{millis:03}"
 
-    def __run_cmd(self, command: list) -> bool:
+    def __run_cmd(self, command: list) -> Optional[bytes]:
         """
         Run a command using subprocess.run.
-        Raises an exception if the command fails.
+        Returns stdout bytes on success, None on failure.
         """
         try:
             command_str = " ".join(command)
@@ -177,7 +176,7 @@ class WhisperAudioTranscriber:
             self.__logger.error(f"Error running command: {e}")
             return None
 
-        return True
+        return result.stdout
 
     def __parse_timestamp(self, timestamp_str) -> Optional[float]:
         if timestamp_str is None:
@@ -392,7 +391,6 @@ class WhisperAudioTranscriber:
 
     def __transcribe_cpp(self, filepath: Optional[str] = None) -> dict:
         temp_wav_path = None
-        temp_dir = None
         try:
             if self.__audio_data:
                 fd, temp_wav_path = tempfile.mkstemp(suffix=".wav")
@@ -402,15 +400,13 @@ class WhisperAudioTranscriber:
             else:
                 wav_filepath = filepath
 
-            temp_dir = tempfile.mkdtemp()
-            temp_output_prefix = str(Path(temp_dir) / "output")
             command = [
                 self.__whisper_cpp_path,
                 "-l",
                 self.__language,
                 "-ojf",
                 "-of",
-                temp_output_prefix,
+                "-",
                 "-m",
                 self.__model_name,
                 "-sns",
@@ -419,18 +415,12 @@ class WhisperAudioTranscriber:
                 wav_filepath,
             ]
 
-            if not self.__run_cmd(command):
+            json_str = self.__run_cmd(command)
+            if json_str is None:
                 raise Exception("Failed to run whisper.cpp command")
-
-            json_path = f"{temp_output_prefix}.json"
-            with open(json_path, "rb") as f:
-                json_str = f.read()
         finally:
             if temp_wav_path and os.path.exists(temp_wav_path):
                 os.remove(temp_wav_path)
-            if temp_dir and os.path.exists(temp_dir):
-                import shutil
-                shutil.rmtree(temp_dir)
 
         result = json.loads(json_str.decode("iso-8859-1"))
         return self.__process_transcription(
