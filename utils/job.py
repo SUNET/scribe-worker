@@ -1,8 +1,10 @@
 import io
 import json
 import logging
+import re
 import requests
 import subprocess
+import tempfile
 import wave
 
 from enum import Enum
@@ -56,6 +58,7 @@ class TranscriptionJob:
         self.filename = None
         self.speakers = 0
         self.file_data = None
+        self.__temp_file = None
 
         # Ensure the file storage directory exists
         Path(self.api_file_storage_dir).mkdir(parents=True, exist_ok=True)
@@ -114,24 +117,18 @@ class TranscriptionJob:
             )
             return False
 
+        # Use a TemporaryFile for seekable input (MP4 moov atom needs seeking).
+        # Passed to ffmpeg via /dev/fd/N — no user-visible file on disk.
+        self.__temp_file = tempfile.TemporaryFile()
+        self.__temp_file.write(self.file_data)
+        self.file_data = None
+
         self.logger.debug("Transcoding file")
         if not self.__transcode_file():
             self.logger.error("Transcoding failed")
             self.__put_status(
                 JobStatusEnum.FAILED,
                 error="Transcoding failed",
-                transcribed_seconds=None,
-            )
-            return False
-
-        self.logger.debug("Transcribing file")
-        transcribed_seconds = self.__transcribe()
-
-        if not transcribed_seconds:
-            self.logger.error("Transcription failed")
-            self.__put_status(
-                JobStatusEnum.FAILED,
-                error="Transcription failed",
                 transcribed_seconds=None,
             )
             return False
@@ -146,7 +143,20 @@ class TranscriptionJob:
             )
             return False
 
-        self.file_data = None
+        # Close the temp file (auto-deleted) before transcription.
+        self.__close_temp_file()
+
+        self.logger.debug("Transcribing file")
+        transcribed_seconds = self.__transcribe()
+
+        if not transcribed_seconds:
+            self.logger.error("Transcription failed")
+            self.__put_status(
+                JobStatusEnum.FAILED,
+                error="Transcription failed",
+                transcribed_seconds=None,
+            )
+            return False
 
         self.logger.debug("Uploading results to backend")
         if not self.__put_result():
@@ -173,6 +183,7 @@ class TranscriptionJob:
         Transcribe the audio file using Hugging Face Whisper.
         """
         self.logger.info("Starting transcription")
+        self.logger.debug(f"wav_data size: {len(self.wav_data) if self.wav_data else 0}")
         transcriber = WhisperAudioTranscriber(
             self.logger,
             "hf" if self.hf_whisper else "cpp",
@@ -223,18 +234,21 @@ class TranscriptionJob:
 
         return True
 
-    def __run_cmd_pipe(self, command: list, input_data: bytes) -> bool:
+    def __run_cmd_pipe(self, command: list, input_data: bytes = None, pass_fds: tuple = ()) -> bytes:
         """
-        Run a command using subprocess.Popen, piping input_data to stdin.
+        Run a command, capturing stdout.
+        Optionally pipes input_data to stdin.
+        Optionally passes file descriptors to the child process.
         """
         try:
-            command_str = " ".join(command)
+            command_str = re.sub(r"/dev/fd/\d+", "<fd>", " ".join(command))
             self.logger.debug(f"Executing piped command: {command_str}")
             process = subprocess.Popen(
                 command,
-                stdin=subprocess.PIPE,
+                stdin=subprocess.PIPE if input_data else None,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                pass_fds=pass_fds,
             )
             stdout, stderr = process.communicate(input=input_data)
 
@@ -256,11 +270,12 @@ class TranscriptionJob:
         Downscale videos to a smaller size.
         Output is captured in memory (self.mp4_data).
         """
-
+        self.__temp_file.seek(0)
+        fd = self.__temp_file.fileno()
         command = [
             settings.FFMPEG_PATH,
             "-i",
-            "pipe:0",
+            self.__ffmpeg_input_path(),
             "-vf",
             "scale=-2:240:flags=lanczos",
             "-c:v",
@@ -296,7 +311,7 @@ class TranscriptionJob:
             "pipe:1",
         ]
         try:
-            self.mp4_data = self.__run_cmd_pipe(command, self.file_data)
+            self.mp4_data = self.__run_cmd_pipe(command, pass_fds=(fd,))
         except Exception as e:
             self.logger.error(f"Error during downscaling: {e}")
             return False
@@ -315,18 +330,29 @@ class TranscriptionJob:
             wf.writeframes(pcm_data)
         return buf.getvalue()
 
+    def __ffmpeg_input_path(self) -> str:
+        """
+        Return /dev/fd/N path for the seekable temp file descriptor.
+        """
+        return f"/dev/fd/{self.__temp_file.fileno()}"
+
+    def __close_temp_file(self):
+        if self.__temp_file:
+            self.__temp_file.close()
+            self.__temp_file = None
+
     def __transcode_file(self) -> bool:
         """
         Transcode the audio file using ffmpeg.
         The transcoded format should be 16kHz mono signed 16-bit PCM.
-        Raw PCM is piped to stdout (WAV format requires seeking, which
-        pipes don't support), then wrapped in a WAV header in memory.
+        Raw PCM is piped to stdout, then wrapped in a WAV header in memory.
         """
-
+        self.__temp_file.seek(0)
+        fd = self.__temp_file.fileno()
         command = [
             settings.FFMPEG_PATH,
             "-i",
-            "pipe:0",
+            self.__ffmpeg_input_path(),
             "-ar",
             "16000",
             "-ac",
@@ -337,7 +363,7 @@ class TranscriptionJob:
         ]
 
         try:
-            pcm_data = self.__run_cmd_pipe(command, self.file_data)
+            pcm_data = self.__run_cmd_pipe(command, pass_fds=(fd,))
             self.wav_data = self.__raw_pcm_to_wav(pcm_data)
         except Exception as e:
             self.logger.error(f"Error during transcoding: {e}")
@@ -502,5 +528,6 @@ class TranscriptionJob:
         self.srt_data = None
         self.json_data = None
         self.mp4_data = None
+        self.__close_temp_file()
 
         return True
