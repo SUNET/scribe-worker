@@ -12,6 +12,9 @@ from utils.settings import get_settings
 
 settings = get_settings()
 
+if settings.HF_TOKEN:
+    os.environ["HF_TOKEN"] = settings.HF_TOKEN
+
 
 def get_torch_device() -> tuple:
     """
