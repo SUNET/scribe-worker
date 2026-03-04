@@ -533,6 +533,8 @@ class TranscriptionJob:
         """
         Upload a single result (srt/json) to the API broker.
         """
+        import json as json_module
+        self.logger.debug(f"Upload {output_format} payload: {json_module.dumps(json_data, default=str)[:500]}")
         response = requests.put(
             f"{self.api_url}/{self.user_id}/{self.uuid}/result",
             json=json_data,
@@ -556,7 +558,8 @@ class TranscriptionJob:
 
         try:
             if self.output_format == "txt" and self.json_data:
-                self.__upload_result("json", {"result": self.json_data, "format": "json"})
+                import json as json_module
+                self.__upload_result("json", {"result": json_module.dumps(self.json_data), "format": "json"})
                 self.logger.info(f"Uploaded json for job {self.uuid}")
             elif self.srt_data:
                 self.__upload_result("srt", {"result": self.srt_data, "format": "srt"})
