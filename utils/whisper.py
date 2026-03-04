@@ -20,8 +20,11 @@ import logging
 import numpy as np
 import os
 import torch
+import warnings
 import wave
 import whisper_timestamped as whisper
+
+warnings.filterwarnings("ignore", module="pyannote")
 
 from huggingface_hub import snapshot_download
 from pyannote.audio import Pipeline
@@ -62,6 +65,43 @@ def diarization_init(hf_token: str) -> Optional[Pipeline]:
     ).to(torch.device(device))
 
 
+_model_cache: dict[str, object] = {}
+
+
+def load_whisper_model(model_name: str, logger: logging.Logger) -> object:
+    """
+    Load and cache a whisper model. Returns cached model if already loaded.
+    """
+    if model_name in _model_cache:
+        logger.info(f"Using cached model '{model_name}'")
+        return _model_cache[model_name]
+
+    device, _ = get_torch_device()
+
+    # Parse optional revision (e.g. "kblab/kb-whisper-large@strict")
+    revision = None
+    load_name = model_name
+    if "@" in load_name:
+        load_name, revision = load_name.rsplit("@", 1)
+
+    # If a specific revision is needed, download via huggingface_hub first
+    # and pass the local path to whisper-timestamped (bypasses its revision=None)
+    if revision and "/" in load_name:
+        load_name = snapshot_download(load_name, revision=revision)
+        logger.info(f"Using '{model_name}' revision '{revision}' from {load_name}")
+
+    try:
+        model = whisper.load_model(load_name, device=device)
+    except NotImplementedError:
+        logger.warning(f"Failed to load model on {device}, falling back to CPU")
+        device = "cpu"
+        model = whisper.load_model(load_name, device=device)
+
+    logger.info(f"Loaded model '{model_name}' on {device}")
+    _model_cache[model_name] = model
+    return model
+
+
 class WhisperAudioTranscriber:
     def __init__(
         self,
@@ -83,37 +123,8 @@ class WhisperAudioTranscriber:
         self.__logger = logger
         self.__speakers = speakers
         self.__diarization_pipeline = diarization_object
-
-        # Parse optional revision from model name (e.g. "kblab/kb-whisper-large@strict")
-        if "@" in model_name:
-            self.__model_name, self.__revision = model_name.rsplit("@", 1)
-        else:
-            self.__model_name = model_name
-            self.__revision = None
-
-        self.__load_model()
-        self.__logger.info(f"Loaded model '{self.__model_name}' on {self.__device}")
-
-    def __load_model(self) -> None:
-        """Load the whisper model via whisper-timestamped."""
-        model_name = self.__model_name
-
-        # If a specific revision is needed, download via huggingface_hub first
-        # and pass the local path to whisper-timestamped (bypasses its revision=None)
-        if self.__revision and "/" in model_name:
-            model_name = snapshot_download(
-                model_name,
-                revision=self.__revision,
-            )
-            self.__logger.info(f"Using '{self.__model_name}' revision '{self.__revision}' from {model_name}")
-
-        try:
-            self.__model = whisper.load_model(model_name, device=self.__device)
-        except NotImplementedError:
-            self.__logger.warning(f"Failed to load model on {self.__device}, falling back to CPU")
-            self.__device = "cpu"
-            self.__torch_dtype = torch.float32
-            self.__model = whisper.load_model(model_name, device=self.__device)
+        self.__model_name = model_name
+        self.__model = load_whisper_model(model_name, logger)
 
     def __decode_wav_bytes(self, wav_bytes: bytes) -> tuple:
         """
@@ -369,7 +380,7 @@ class WhisperAudioTranscriber:
         return {
             "full_transcription": self.__result["full_transcription"],
             "segments": aligned_segments,
-            "speaker_count": len(list(diarization.speaker_diarization.labels()))
+            "speaker_count": int(len(list(diarization.speaker_diarization.labels())))
             if diarization
             else 0,
         }
@@ -393,12 +404,12 @@ class WhisperAudioTranscriber:
             )
 
             segment = {
-                "start": chunk_start,
-                "end": chunk_end,
+                "start": float(chunk_start),
+                "end": float(chunk_end),
                 "text": chunk_text.strip(),
                 "speaker": dominant_speaker,
                 "active_speakers": active_speakers,
-                "duration": chunk_end - chunk_start,
+                "duration": float(chunk_end - chunk_start),
             }
 
             if avg_score is not None:
