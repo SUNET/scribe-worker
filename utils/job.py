@@ -553,7 +553,7 @@ class TranscriptionJob:
                 )] = "srt"
             if self.json_data:
                 futures[pool.submit(
-                    self.__upload_result, "json", {"result": self.json_data, "format": "json"}
+                    self.__upload_result, "json", {"result": self.json_data, "format": self.output_format}
                 )] = "json"
             if self.mp4_data:
                 futures[pool.submit(self.__upload_media)] = "media"
