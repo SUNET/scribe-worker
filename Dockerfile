@@ -1,41 +1,28 @@
-FROM debian:bookworm-slim
+FROM python:3.12-slim-bookworm
 
-# Install dependencies
+# Install runtime dependencies
 RUN apt-get update && \
 	apt-get install -y --no-install-recommends \
 		ca-certificates \
 		curl \
 		ffmpeg \
-		gcc \
-		git \
-		gnupg \
-		libcurl4-openssl-dev \
-		libssl-dev \
-		make \
-		pkg-config \
-		python3 \
-		python3-dev \
-		python3-pip \
-		python3-setuptools \
-		python3-wheel \
-		python3-venv \
-		sudo \
-		unzip \
-		wget && \
+		git && \
 	rm -rf /var/lib/apt/lists/*
 
+# Install uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
 WORKDIR /app
+
+# Copy dependency files first for better caching
+COPY pyproject.toml uv.lock ./
+
+# Install dependencies
+RUN uv sync --frozen --no-dev
 
 # Copy application files
 COPY main.py .
 COPY utils/ utils/
-COPY requirements.txt .
-
-# Install broker dependencies
-RUN python3 -m venv venv && \
-	. venv/bin/activate && \
-	python3 -m pip install --upgrade pip && \
-	pip install --no-cache-dir -r requirements.txt
 
 # Run worker
-CMD ["/app/venv/bin/python3", "main.py", "--foreground", "--debug", "--no-healthcheck"]
+CMD ["uv", "run", "python", "main.py", "--foreground", "--debug", "--no-healthcheck"]

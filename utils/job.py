@@ -8,7 +8,6 @@ import tempfile
 import wave
 
 from enum import Enum
-from pathlib import Path
 from typing import Optional
 from utils import settings
 from utils.whisper import WhisperAudioTranscriber
@@ -34,14 +33,10 @@ class TranscriptionJob:
         self,
         logger: logging.Logger,
         api_url: str,
-        api_file_storage_dir: str,
-        hf_whisper: Optional[bool] = False,
         hf_token: Optional[str] = None,
     ):
         self.logger = logger
         self.api_url = api_url
-        self.api_file_storage_dir = api_file_storage_dir
-        self.hf_whisper = hf_whisper
         self.hf_token = hf_token
         self.speakers = 0
         self.file_data = None
@@ -59,9 +54,6 @@ class TranscriptionJob:
         self.speakers = 0
         self.file_data = None
         self.__temp_file = None
-
-        # Ensure the file storage directory exists
-        Path(self.api_file_storage_dir).mkdir(parents=True, exist_ok=True)
 
         return self
 
@@ -93,7 +85,6 @@ class TranscriptionJob:
             self.speakers = 0
 
         self.logger.info(f"Starting transcription job {self.uuid}")
-        self.logger.info(f"  HF: {self.hf_whisper}")
         self.logger.info(f"  User: {self.user_id}")
         self.logger.info(f"  Language: {self.language}")
         self.logger.info(f"  Model: {self.model}")
@@ -183,10 +174,8 @@ class TranscriptionJob:
         Transcribe the audio file using Hugging Face Whisper.
         """
         self.logger.info("Starting transcription")
-        self.logger.debug(f"wav_data size: {len(self.wav_data) if self.wav_data else 0}")
         transcriber = WhisperAudioTranscriber(
             self.logger,
-            "hf" if self.hf_whisper else "cpp",
             audio_data=self.wav_data,
             model_name=self.model,
             language=self.language,
@@ -501,19 +490,10 @@ class TranscriptionJob:
 
     def __get_model(self) -> str:
         """
-        Return the correct model file based on
+        Return the correct model name based on
         model type and language.
         """
-
-        if self.hf_whisper:
-            model = settings.WHISPER_MODELS_HF[self.language][self.model_type.lower()]
-        else:
-            model = (
-                "models/"
-                + settings.WHISPER_MODELS_CPP[self.language][self.model_type.lower()]
-            )
-
-        return model
+        return settings.WHISPER_MODELS_HF[self.language][self.model_type.lower()]
 
     def __cleanup(self) -> bool:
         """
