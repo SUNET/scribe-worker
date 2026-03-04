@@ -15,6 +15,8 @@ settings = get_settings()
 if settings.HF_TOKEN:
     os.environ["HF_TOKEN"] = settings.HF_TOKEN
 
+os.environ["TORCH_HUB_TRUST_REPO"] = "1"
+
 
 def get_torch_device() -> tuple:
     """
