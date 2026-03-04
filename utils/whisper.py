@@ -30,6 +30,9 @@ from utils.settings import get_settings
 
 settings = get_settings()
 
+if settings.HF_TOKEN:
+    os.environ["HF_TOKEN"] = settings.HF_TOKEN
+
 os.environ["PYANNOTE_METRICS_ENABLED"] = "0"
 set_telemetry_metrics(False, save_choice_as_default=True)
 
