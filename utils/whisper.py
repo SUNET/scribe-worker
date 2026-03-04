@@ -16,19 +16,15 @@
 # limitations under the License.
 
 import io
-import json
 import logging
 import numpy as np
 import os
-import re
-import subprocess
-import tempfile
 import torch
 import wave
+import whisper_timestamped as whisper
 
 from pyannote.audio import Pipeline
 from pyannote.audio.telemetry import set_telemetry_metrics
-from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
 from typing import Optional
 from utils.settings import get_settings
 
@@ -65,21 +61,14 @@ class WhisperAudioTranscriber:
     def __init__(
         self,
         logger: logging.Logger,
-        backend: str,
         audio_path: Optional[str] = None,
-        model_name: Optional[str] = "KBLab/kb-whisper-base",
+        model_name: Optional[str] = "base",
         language: Optional[str] = "sv",
         speakers: Optional[int] = 0,
         hf_token: Optional[str] = None,
-        whisper_cpp_path: Optional[str] = settings.WHISPER_CPP_PATH,
         diarization_object: Optional[Pipeline] = None,
         audio_data: Optional[bytes] = None,
     ) -> None:
-        """
-        Initializes the WhisperAudioTranscriber with the audio
-        file path, model name,
-        """
-
         self.__audio_path = audio_path
         self.__audio_data = audio_data
         self.__model_name = model_name
@@ -87,39 +76,17 @@ class WhisperAudioTranscriber:
         self.__device, self.__torch_dtype = get_torch_device()
         self.__language = language
         self.__result = None
-        self.__whisper_cpp_path = whisper_cpp_path
-        self.__backend = backend
         self.__logger = logger
         self.__speakers = speakers
         self.__diarization_pipeline = diarization_object
-        self.__tokens_to_ignore = [
-            "<|nospeech|>",
-            "<|p>",
-            "<|>",
-            '"',
-        ]
 
-        if backend == "hf":
-            self.__hf_init()
-
-    def __hf_init(self) -> None:
-        self.model = AutoModelForSpeechSeq2Seq.from_pretrained(
-            self.__model_name,
-            torch_dtype=self.__torch_dtype,
-            use_safetensors=True,
-            cache_dir="cache",
-        )
-        self.model.to(self.__device)
-        self.processor = AutoProcessor.from_pretrained(self.__model_name)
-        self.pipe = pipeline(
-            "automatic-speech-recognition",
-            model=self.__model_name,
-            tokenizer=self.processor.tokenizer,
-            feature_extractor=self.processor.feature_extractor,
-            torch_dtype=self.__torch_dtype,
-            device=self.__device,
-            return_timestamps=True,
-        )
+        try:
+            self.__model = whisper.load_model(self.__model_name, device=self.__device)
+        except NotImplementedError:
+            logger.warning(f"Failed to load model on {self.__device}, falling back to CPU")
+            self.__device = "cpu"
+            self.__torch_dtype = torch.float32
+            self.__model = whisper.load_model(self.__model_name, device=self.__device)
 
     def __decode_wav_bytes(self, wav_bytes: bytes) -> tuple:
         """
@@ -149,149 +116,47 @@ class WhisperAudioTranscriber:
         Convert seconds (float or string) to SRT timestamp format
         (HH:MM:SS,mmm).
         """
-        seconds = float(seconds)  # ensure it's a float
+        seconds = float(seconds)
         millis = int(round((seconds % 1) * 1000))
         total_seconds = int(seconds)
         hours, remainder = divmod(total_seconds, 3600)
         minutes, secs = divmod(remainder, 60)
         return f"{hours:02}:{minutes:02}:{secs:02},{millis:03}"
 
-    def __run_cmd(
-        self, command: list, input_data: Optional[bytes] = None, pass_fds: tuple = ()
-    ) -> Optional[bytes]:
+    def __process_transcription(self, segments: list) -> dict:
         """
-        Run a command using subprocess.run.
-        Optionally pipes input_data to stdin.
-        Returns stdout bytes on success, None on failure.
-        """
-        try:
-            command_str = re.sub(r"/dev/fd/\d+", "<fd>", " ".join(command))
-            self.__logger.debug(f"Running command: {command_str}")
-            result = subprocess.run(
-                command, input=input_data, capture_output=True, pass_fds=pass_fds
-            )
-
-            if result.returncode != 0:
-                raise subprocess.CalledProcessError(
-                    returncode=result.returncode,
-                    cmd=command_str,
-                    output=result.stdout.decode(),
-                    stderr=result.stderr.decode(),
-                )
-        except Exception as e:
-            self.__logger.error(f"Error running command: {e}")
-            return None
-
-        return result.stdout
-
-    def __parse_timestamp(self, timestamp_str) -> Optional[float]:
-        if timestamp_str is None:
-            return None
-
-        time_part, ms_part = timestamp_str.split(",")
-
-        if not ms_part:
-            ms_part = "0"
-
-        # Split time part into hours, minutes, seconds
-        hours, minutes, seconds = map(int, time_part.split(":"))
-
-        # Convert to total seconds
-        total_seconds = hours * 3600 + minutes * 60 + seconds + int(ms_part) / 1000.0
-
-        return total_seconds
-
-    def __calculate_avg_score(self, tokens: list) -> Optional[float]:
-        """
-        Calculate the average probability score from token 'p' values.
-        Excludes special tokens like [_BEG_].
-        """
-        scores = [
-            token.get("p", 0)
-            for token in tokens
-            if token.get("text", "").strip()
-            and not token.get("text", "").startswith("[")
-        ]
-        if scores:
-            return round(sum(scores) / len(scores), 4)
-        return None
-
-    def __process_transcription(self, items, source: str) -> dict:
-        """
-        Normalize and process transcription items from either HF or
-        whisper.cpp.
+        Normalize and process transcription segments from whisper-timestamped.
         """
         full_transcription = ""
-        segments = []
+        processed_segments = []
         chunks = []
 
-        for index, item in enumerate(items):
-            text = item.get("text", "").strip()
+        for segment in segments:
+            text = segment.get("text", "").strip()
 
             if not text:
                 continue
 
-            if text in self.__tokens_to_ignore:
-                continue
-
-            if source == "cpp":
-                try:
-                    text = bytes(text, "iso-8859-1").decode("utf-8")
-                except UnicodeDecodeError:
-                    self.__logger.error(
-                        f"Failed to decode {text} from transcription, using ISO-8859-1 encoding."
-                    )
-                    continue
+            start_time = segment["start"]
+            end_time = segment["end"]
 
             if full_transcription and not full_transcription.endswith(" "):
                 full_transcription += " "
 
             full_transcription += text
 
-            # Calculate average score for cpp backend
-            avg_score = None
-            if source == "cpp" and "tokens" in item:
-                avg_score = self.__calculate_avg_score(item["tokens"])
-
-            if source == "hf":
-                start, end = item["timestamp"]
-                start_ms = self.__seconds_to_srt_time(str(start))
-                end_ms = self.__seconds_to_srt_time(str(end))
-                start_time = self.__parse_timestamp(start_ms)
-                end_time = self.__parse_timestamp(end_ms)
-                ts_ms = (start_ms, end_ms)
-
-            else:
-                if item["tokens"][0]["text"] == "[_BEG_]":
-                    start_time_token = item["tokens"][1]["timestamps"]["from"]
-                    start_time = self.__parse_timestamp(start_time_token)
-                else:
-                    start_time_token = item["tokens"][0]["timestamps"]["from"]
-                    start_time = self.__parse_timestamp(start_time_token)
-
-                end_time_token = item["tokens"][-1]["timestamps"]["to"]
-                end_time = self.__parse_timestamp(end_time_token)
-
-                if (end_time - start_time) < 1.5:
-                    time_to_add = 1.5 - (end_time - start_time)
-                    next_item_start_time = self.__parse_timestamp(
-                        items[index + 1]["tokens"][0]["timestamps"]["from"]
-                        if index + 1 < len(items)
-                        else None
-                    )
-
-                    end_time += time_to_add
-
-                    if next_item_start_time and end_time > next_item_start_time:
-                        end_time = next_item_start_time - 0.1
-
-                    end_time_token = self.__seconds_to_srt_time(str(end_time))
-
-                ts_ms = (start_time_token, end_time_token)
-
+            start_ms = self.__seconds_to_srt_time(start_time)
+            end_ms = self.__seconds_to_srt_time(end_time)
+            ts_ms = (start_ms, end_ms)
             duration = end_time - start_time
 
-            # If the text is longer than 90 characters, split it in the middle and adjust timestamps.
+            avg_score = None
+            words = segment.get("words", [])
+            if words:
+                confidences = [w.get("confidence", 0) for w in words if w.get("text", "").strip()]
+                if confidences:
+                    avg_score = round(sum(confidences) / len(confidences), 4)
+
             if len(text) > 90:
                 mid_index = len(text) // 2
                 split_index = text.rfind(" ", 0, mid_index)
@@ -304,7 +169,7 @@ class WhisperAudioTranscriber:
 
                 mid_time = start_time + duration / 2
 
-                segments.append(
+                processed_segments.append(
                     {
                         "start": start_time,
                         "end": mid_time,
@@ -314,7 +179,7 @@ class WhisperAudioTranscriber:
                     }
                 )
 
-                segments.append(
+                processed_segments.append(
                     {
                         "start": mid_time,
                         "end": end_time,
@@ -329,7 +194,7 @@ class WhisperAudioTranscriber:
                         "timestamp": (start_time, mid_time),
                         "timestamp_ms": (
                             ts_ms[0],
-                            self.__seconds_to_srt_time(str(mid_time)),
+                            self.__seconds_to_srt_time(mid_time),
                         ),
                         "text": first_part,
                         "avg_score": avg_score,
@@ -340,7 +205,7 @@ class WhisperAudioTranscriber:
                     {
                         "timestamp": (mid_time, end_time),
                         "timestamp_ms": (
-                            self.__seconds_to_srt_time(str(mid_time)),
+                            self.__seconds_to_srt_time(mid_time),
                             ts_ms[1],
                         ),
                         "text": second_part,
@@ -350,7 +215,7 @@ class WhisperAudioTranscriber:
 
                 continue
 
-            segments.append(
+            processed_segments.append(
                 {
                     "start": start_time,
                     "end": end_time,
@@ -371,74 +236,29 @@ class WhisperAudioTranscriber:
 
         converted = {
             "full_transcription": full_transcription,
-            "segments": segments,
+            "segments": processed_segments,
             "chunks": chunks,
             "speaker_count": 1,
         }
 
         self.__result = converted
-        self.__transcribed_seconds = segments[-1]["end"] if segments else 0
+        self.__transcribed_seconds = processed_segments[-1]["end"] if processed_segments else 0
 
         return converted
 
-    def __transcribe_hf(self, filepath: Optional[str] = None) -> dict:
+    def __transcribe_audio(self, filepath: Optional[str] = None) -> dict:
         if self.__audio_data:
-            audio_array, sample_rate = self.__decode_wav_bytes(self.__audio_data)
-            audio_input = {"raw": audio_array, "sampling_rate": sample_rate}
+            audio, _ = self.__decode_wav_bytes(self.__audio_data)
         else:
-            audio_input = filepath
+            audio = whisper.load_audio(filepath)
 
-        result = self.pipe(
-            audio_input,
-            generate_kwargs={"task": "transcribe", "language": self.__language},
+        result = whisper.transcribe(
+            self.__model,
+            audio,
+            language=self.__language,
         )
 
-        return self.__process_transcription(result.get("chunks", []), source="hf")
-
-    def __transcribe_cpp(self, filepath: Optional[str] = None) -> dict:
-        # -of - writes JSON to stdout (via /dev/stdout).
-        # -np suppresses text output so stdout contains only JSON.
-        # Use TemporaryFile + /dev/fd/N to avoid visible files on disk.
-        temp_file = None
-        try:
-            if self.__audio_data:
-                temp_file = tempfile.TemporaryFile()
-                temp_file.write(self.__audio_data)
-                temp_file.seek(0)
-                fd = temp_file.fileno()
-                wav_filepath = f"/dev/fd/{fd}"
-                fds = (fd,)
-            else:
-                wav_filepath = filepath
-                fds = ()
-
-            command = [
-                self.__whisper_cpp_path,
-                "-l",
-                self.__language,
-                "-ojf",
-                "-of",
-                "-",
-                "-np",
-                "-m",
-                self.__model_name,
-                "-sns",
-                "-fa",
-                "-f",
-                wav_filepath,
-            ]
-
-            json_str = self.__run_cmd(command, pass_fds=fds)
-            if json_str is None:
-                raise Exception("Failed to run whisper.cpp command")
-        finally:
-            if temp_file:
-                temp_file.close()
-
-        result = json.loads(json_str.decode("iso-8859-1"))
-        return self.__process_transcription(
-            result.get("transcription", []), source="cpp"
-        )
+        return self.__process_transcription(result.get("segments", []))
 
     def transcribe(self) -> dict:
         """
@@ -453,13 +273,7 @@ class WhisperAudioTranscriber:
             raise ValueError("Either audio_data or audio_path must be provided.")
 
         try:
-            match self.__backend:
-                case "hf":
-                    self.__transcribe_hf(self.__audio_path)
-                case "cpp":
-                    self.__transcribe_cpp(self.__audio_path)
-                case _:
-                    raise ValueError(f"Unsupported backend: {self.__backend}")
+            self.__transcribe_audio(self.__audio_path)
         except Exception as e:
             self.__logger.error(f"Error during transcription: {str(e)}")
             return None
@@ -627,7 +441,7 @@ class WhisperAudioTranscriber:
 
     def __format_timestamp(self, seconds) -> str:
         """
-        Format a timestamp in seconds to MM:SS format.
+        Format a timestamp in seconds to HH:MM:SS format.
         """
         hours = int(seconds // 3600)
         minutes = int(seconds // 60)
@@ -664,19 +478,20 @@ class WhisperAudioTranscriber:
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.DEBUG)
     logger = logging.getLogger("whisper_transcriber")
 
     audio_file = "test.wav"
     transcriber = WhisperAudioTranscriber(
         logger=logger,
-        backend="cpp",
         audio_path=audio_file,
-        model_name="models/sv_large.bin",
+        model_name="base",
         language="sv",
         speakers=2,
     )
 
     transcribed_seconds = transcriber.transcribe()
-    diarization_result = transcriber.diarization()
+    print(f"Transcribed seconds: {transcribed_seconds}")
 
-    print(diarization_result)
+    subtitles = transcriber.subtitles()
+    print(f"Subtitles:\n{subtitles}")

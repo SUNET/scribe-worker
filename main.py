@@ -96,17 +96,11 @@ def mainloop(worker_id: int) -> None:
     while True:
         sleep_time = randint(10, 60)
 
-        logger.debug(
-            f"[{worker_id}] Sleeping for {sleep_time} seconds before fetching a new job..."
-        )
-
         sleep(sleep_time)
 
         with TranscriptionJob(
             logger,
             api_url,
-            settings.FILE_STORAGE_DIR,
-            hf_whisper=settings.HF_WHISPER,
             hf_token=settings.HF_TOKEN,
         ) as job:
             job.start()
