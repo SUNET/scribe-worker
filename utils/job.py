@@ -134,15 +134,26 @@ class TranscriptionJob:
             )
             return False
 
-        self.logger.debug("Downscaling file")
-        if not self.__downscale_file():
-            self.logger.error("Downscaling failed")
-            self.__put_status(
-                JobStatusEnum.FAILED,
-                error="Downscaling failed",
-                transcribed_seconds=None,
-            )
-            return False
+        if self.__has_video_stream():
+            self.logger.debug("Downscaling video")
+            if not self.__downscale_video():
+                self.logger.error("Downscaling failed")
+                self.__put_status(
+                    JobStatusEnum.FAILED,
+                    error="Downscaling failed",
+                    transcribed_seconds=None,
+                )
+                return False
+        else:
+            self.logger.debug("Downsampling audio")
+            if not self.__downsample_audio():
+                self.logger.error("Audio downsampling failed")
+                self.__put_status(
+                    JobStatusEnum.FAILED,
+                    error="Audio downsampling failed",
+                    transcribed_seconds=None,
+                )
+                return False
 
         # Close the temp file (auto-deleted) before transcription.
         self.__close_temp_file()
@@ -264,7 +275,7 @@ class TranscriptionJob:
 
         return stdout
 
-    def __downscale_file(self) -> bool:
+    def __downscale_video(self) -> bool:
         """
         Downscale videos to a smaller size.
         Output is captured in memory (self.mp4_data).
@@ -313,6 +324,40 @@ class TranscriptionJob:
 
         return True
 
+    def __downsample_audio(self) -> bool:
+        """
+        Downsample audio to a lightweight MP3 preview.
+        Output is captured in memory (self.mp3_data).
+        """
+        self.__temp_file.seek(0)
+        fd = self.__temp_file.fileno()
+        command = [
+            settings.FFMPEG_PATH,
+            "-nostdin",
+            "-threads", "0",
+            "-i",
+            self.__ffmpeg_input_path(),
+            "-c:a",
+            "libmp3lame",
+            "-b:a",
+            "64k",
+            "-ar",
+            "44100",
+            "-ac",
+            "1",
+            "-f",
+            "mp3",
+            "pipe:1",
+        ]
+        try:
+            self.mp3_data = self.__run_cmd_pipe(command, pass_fds=(fd,))
+            self.mp4_data = None
+        except Exception as e:
+            self.logger.error(f"Error during audio downsampling: {e}")
+            return False
+
+        return True
+
     def __raw_pcm_to_wav(self, pcm_data: bytes, sample_rate: int = 16000, channels: int = 1, sample_width: int = 2) -> bytes:
         """
         Wrap raw PCM (s16le) data in a WAV header.
@@ -324,6 +369,26 @@ class TranscriptionJob:
             wf.setframerate(sample_rate)
             wf.writeframes(pcm_data)
         return buf.getvalue()
+
+    def __has_video_stream(self) -> bool:
+        """
+        Probe the temp file with ffprobe to check for a video stream.
+        """
+        self.__temp_file.seek(0)
+        fd = self.__temp_file.fileno()
+        command = [
+            "ffprobe",
+            "-v", "quiet",
+            "-select_streams", "v",
+            "-show_entries", "stream=codec_type",
+            "-of", "csv=p=0",
+            self.__ffmpeg_input_path(),
+        ]
+        try:
+            output = self.__run_cmd_pipe(command, pass_fds=(fd,))
+            return b"video" in output
+        except Exception:
+            return False
 
     def __ffmpeg_input_path(self) -> str:
         """
@@ -436,17 +501,27 @@ class TranscriptionJob:
 
         return True
 
-    def __upload_mp4(self) -> None:
+    def __upload_media(self) -> None:
         """
-        Upload the MP4 data to the API broker.
+        Upload the media preview (MP4 or MP3) to the API broker.
         """
+        if self.mp4_data:
+            filename = f"{self.uuid}.mp4"
+            data = self.mp4_data
+            mime = "video/mp4"
+        else:
+            filename = f"{self.uuid}.mp3"
+            data = self.mp3_data
+            mime = "audio/mpeg"
+
         response = requests.put(
             f"{self.api_url}/{self.user_id}/{self.uuid}/file",
-            files={"file": (f"{self.uuid}.mp4", io.BytesIO(self.mp4_data), "video/mp4")},
+            files={"file": (filename, io.BytesIO(data), mime)},
             cert=(settings.SSL_CERTFILE, settings.SSL_KEYFILE),
         )
         response.raise_for_status()
         self.mp4_data = None
+        self.mp3_data = None
 
     def __upload_result(self, output_format: str, json_data: dict) -> None:
         """
@@ -475,8 +550,8 @@ class TranscriptionJob:
                 futures[pool.submit(
                     self.__upload_result, "json", {"result": self.json_data, "format": "json"}
                 )] = "json"
-            if self.mp4_data:
-                futures[pool.submit(self.__upload_mp4)] = "mp4"
+            if self.mp4_data or self.mp3_data:
+                futures[pool.submit(self.__upload_media)] = "media"
 
             for future in as_completed(futures):
                 name = futures[future]
@@ -508,6 +583,7 @@ class TranscriptionJob:
         self.srt_data = None
         self.json_data = None
         self.mp4_data = None
+        self.mp3_data = None
         self.__close_temp_file()
 
         return True

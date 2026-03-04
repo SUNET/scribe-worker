@@ -61,6 +61,10 @@ class Settings(BaseSettings):
             "fast transcription (normal accuracy)": "kblab/kb-whisper-base",
             "slower transcription (higher accuracy)": "kblab/kb-whisper-large",
         },
+        "Swedish (verbatim)": {
+            "fast transcription (normal accuracy)": "kblab/kb-whisper-base@strict",
+            "slower transcription (higher accuracy)": "kblab/kb-whisper-large@strict",
+        },
         "English": {
             "fast transcription (normal accuracy)": "base.en",
             "slower transcription (higher accuracy)": "large-v3",

@@ -25,6 +25,7 @@ import whisper_timestamped as whisper
 
 from pyannote.audio import Pipeline
 from pyannote.audio.telemetry import set_telemetry_metrics
+from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
 from typing import Optional
 from utils.settings import get_settings
 
@@ -75,7 +76,6 @@ class WhisperAudioTranscriber:
     ) -> None:
         self.__audio_path = audio_path
         self.__audio_data = audio_data
-        self.__model_name = model_name
         self.__hf_token = hf_token
         self.__device, self.__torch_dtype = get_torch_device()
         self.__language = language
@@ -84,6 +84,52 @@ class WhisperAudioTranscriber:
         self.__speakers = speakers
         self.__diarization_pipeline = diarization_object
 
+        # Parse optional revision from model name (e.g. "kblab/kb-whisper-large@strict")
+        if "@" in model_name:
+            self.__model_name, self.__revision = model_name.rsplit("@", 1)
+        else:
+            self.__model_name = model_name
+            self.__revision = None
+
+        # HF models (contain "/") use transformers pipeline, others use whisper-timestamped
+        self.__is_hf_model = "/" in self.__model_name
+
+        if self.__is_hf_model:
+            self.__load_hf_model()
+        else:
+            self.__load_whisper_model()
+
+        self.__logger.info(f"Loaded model '{self.__model_name}' on {self.__device}")
+
+    def __load_hf_model(self) -> None:
+        """Load a HuggingFace transformers model (e.g. KBLab)."""
+        kwargs = {}
+        if self.__revision:
+            kwargs["revision"] = self.__revision
+
+        model = AutoModelForSpeechSeq2Seq.from_pretrained(
+            self.__model_name,
+            torch_dtype=self.__torch_dtype,
+            use_safetensors=True,
+            cache_dir="cache",
+            **kwargs,
+        )
+        model.to(self.__device)
+        processor = AutoProcessor.from_pretrained(
+            self.__model_name, **kwargs,
+        )
+        self.__pipe = pipeline(
+            "automatic-speech-recognition",
+            model=model,
+            tokenizer=processor.tokenizer,
+            feature_extractor=processor.feature_extractor,
+            torch_dtype=self.__torch_dtype,
+            device=self.__device,
+            return_timestamps=True,
+        )
+
+    def __load_whisper_model(self) -> None:
+        """Load a standard OpenAI whisper model via whisper-timestamped."""
         try:
             self.__model = whisper.load_model(self.__model_name, device=self.__device)
         except NotImplementedError:
@@ -91,8 +137,6 @@ class WhisperAudioTranscriber:
             self.__device = "cpu"
             self.__torch_dtype = torch.float32
             self.__model = whisper.load_model(self.__model_name, device=self.__device)
-
-        self.__logger.info(f"Loaded model '{self.__model_name}' on {self.__device}")
 
     def __decode_wav_bytes(self, wav_bytes: bytes) -> tuple:
         """
@@ -253,6 +297,40 @@ class WhisperAudioTranscriber:
         return converted
 
     def __transcribe_audio(self, filepath: Optional[str] = None) -> dict:
+        if self.__is_hf_model:
+            return self.__transcribe_hf(filepath)
+        return self.__transcribe_whisper(filepath)
+
+    def __transcribe_hf(self, filepath: Optional[str] = None) -> dict:
+        """Transcribe using HuggingFace transformers pipeline."""
+        if self.__audio_data:
+            audio_array, sample_rate = self.__decode_wav_bytes(self.__audio_data)
+            audio_input = {"raw": audio_array, "sampling_rate": sample_rate}
+        else:
+            audio_input = filepath
+
+        result = self.__pipe(
+            audio_input,
+            generate_kwargs={"task": "transcribe", "language": self.__language},
+        )
+
+        # Convert HF chunks to the same segment format as whisper-timestamped
+        segments = []
+        for chunk in result.get("chunks", []):
+            start, end = chunk["timestamp"]
+            if start is None or end is None:
+                continue
+            segments.append({
+                "start": float(start),
+                "end": float(end),
+                "text": chunk["text"],
+                "words": [],
+            })
+
+        return self.__process_transcription(segments)
+
+    def __transcribe_whisper(self, filepath: Optional[str] = None) -> dict:
+        """Transcribe using whisper-timestamped."""
         if self.__audio_data:
             audio, _ = self.__decode_wav_bytes(self.__audio_data)
         else:
