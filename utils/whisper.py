@@ -261,7 +261,10 @@ class WhisperAudioTranscriber:
             self.__model,
             audio,
             language=self.__language,
-            trust_whisper_timestamps=False,
+            vad=True,
+            beam_size=1,
+            condition_on_previous_text=False,
+            fp16=self.__device != "cpu",
         )
 
         return self.__process_transcription(result.get("segments", []))
