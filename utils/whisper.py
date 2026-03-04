@@ -73,7 +73,6 @@ def load_whisper_model(model_name: str, logger: logging.Logger) -> object:
     Load and cache a whisper model. Returns cached model if already loaded.
     """
     if model_name in _model_cache:
-        logger.info(f"Using cached model '{model_name}'")
         return _model_cache[model_name]
 
     device, _ = get_torch_device()
@@ -117,13 +116,12 @@ class WhisperAudioTranscriber:
         self.__audio_path = audio_path
         self.__audio_data = audio_data
         self.__hf_token = hf_token
-        self.__device, self.__torch_dtype = get_torch_device()
+        self.__device, _ = get_torch_device()
         self.__language = language.split("(")[0].strip().lower() if language else language
         self.__result = None
         self.__logger = logger
         self.__speakers = speakers
         self.__diarization_pipeline = diarization_object
-        self.__model_name = model_name
         self.__model = load_whisper_model(model_name, logger)
 
     def __decode_wav_bytes(self, wav_bytes: bytes) -> tuple:
@@ -345,21 +343,15 @@ class WhisperAudioTranscriber:
                 max_speakers = speakers + 1
 
         if not self.__diarization_pipeline:
-            self.__logger.info("Initializing diarization pipeline...")
             self.__diarization_pipeline = diarization_init(self.__hf_token)
-        else:
-            self.__logger.info("Diarization pipeline already initialized.")
 
         if not self.__diarization_pipeline:
-            self.__logger.error("Diarization pipeline initialization failed.")
             raise Exception("Diarization pipeline is not available.")
 
         if not self.__result:
             raise Exception(
                 "Transcription result is not available. Please transcribe first."
             )
-
-        self.__logger.info("Running diarization pipeline...")
 
         if self.__audio_data:
             audio_array, sample_rate = self.__decode_wav_bytes(self.__audio_data)
@@ -464,7 +456,6 @@ class WhisperAudioTranscriber:
                 "Transcription result is not available or does not contain chunks."
             )
 
-        index = 0
         subtitles = ""
 
         for index, chunk in enumerate(self.__result["chunks"]):
@@ -480,16 +471,6 @@ class WhisperAudioTranscriber:
             subtitles += f"{caption}\n\n"
 
         return subtitles
-
-    def __format_timestamp(self, seconds) -> str:
-        """
-        Format a timestamp in seconds to HH:MM:SS format.
-        """
-        hours = int(seconds // 3600)
-        minutes = int(seconds // 60)
-        seconds = int(seconds % 60)
-
-        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
     def __caption_split(self, caption) -> str:
         """
