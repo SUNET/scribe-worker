@@ -260,8 +260,8 @@ class WhisperAudioTranscriber:
 
         try:
             self.__transcribe_audio(self.__audio_path)
-        except Exception as e:
-            self.__logger.error(f"Error during transcription: {str(e)}")
+        except Exception:
+            self.__logger.exception("Error during transcription")
             return None
 
         if not self.__result:
