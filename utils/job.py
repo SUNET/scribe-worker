@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import wave
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from enum import Enum
 from typing import Optional
 from utils import settings
@@ -39,7 +40,6 @@ class TranscriptionJob:
         self.api_url = api_url
         self.hf_token = hf_token
         self.speakers = 0
-        self.file_data = None
 
     def __enter__(self) -> "TranscriptionJob":
         """
@@ -52,7 +52,6 @@ class TranscriptionJob:
         self.model = None
         self.filename = None
         self.speakers = 0
-        self.file_data = None
         self.__temp_file = None
 
         return self
@@ -107,12 +106,6 @@ class TranscriptionJob:
                 transcribed_seconds=None,
             )
             return False
-
-        # Use a TemporaryFile for seekable input (MP4 moov atom needs seeking).
-        # Passed to ffmpeg via /dev/fd/N — no user-visible file on disk.
-        self.__temp_file = tempfile.TemporaryFile()
-        self.__temp_file.write(self.file_data)
-        self.file_data = None
 
         self.logger.debug("Transcoding file")
         if not self.__transcode_file():
@@ -279,6 +272,8 @@ class TranscriptionJob:
             "baseline",
             "-pix_fmt",
             "yuv420p",
+            "-g", "24",
+            "-keyint_min", "24",
             "-c:a",
             "aac",
             "-b:a",
@@ -379,21 +374,20 @@ class TranscriptionJob:
 
     def __get_file(self) -> bool:
         """
-        Download the file from the API broker.
+        Download the file from the API broker, streaming directly to temp file.
         """
 
         try:
             response = requests.get(
                 f"{self.api_url}/{self.user_id}/{self.uuid}/file",
                 cert=(settings.SSL_CERTFILE, settings.SSL_KEYFILE),
+                stream=True,
             )
             response.raise_for_status()
 
-            if response.status_code != 200:
-                self.logger.error(f"Error downloading file: {response.status_code}")
-                raise Exception("File not downloaded")
-
-            self.file_data = response.content
+            self.__temp_file = tempfile.TemporaryFile()
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                self.__temp_file.write(chunk)
 
         except Exception as e:
             self.logger.error(f"Error downloading file: {e}")
@@ -425,62 +419,56 @@ class TranscriptionJob:
 
         return True
 
-    def __upload_mp4(self, mp4_bytes: bytes) -> bool:
+    def __upload_mp4(self) -> None:
         """
         Upload the MP4 data to the API broker.
         """
+        response = requests.put(
+            f"{self.api_url}/{self.user_id}/{self.uuid}/file",
+            files={"file": (f"{self.uuid}.mp4", io.BytesIO(self.mp4_data), "video/mp4")},
+            cert=(settings.SSL_CERTFILE, settings.SSL_KEYFILE),
+        )
+        response.raise_for_status()
+        self.mp4_data = None
 
-        try:
-            response = requests.put(
-                f"{self.api_url}/{self.user_id}/{self.uuid}/file",
-                files={"file": (f"{self.uuid}.mp4", io.BytesIO(mp4_bytes), "video/mp4")},
-                cert=(settings.SSL_CERTFILE, settings.SSL_KEYFILE),
-            )
-            response.raise_for_status()
-        except requests.RequestException as e:
-            self.logger.error(f"Error uploading MP4 file: {e}")
-            return False
-        except Exception as e:
-            self.logger.error(f"Unexpected error uploading MP4 file: {e}")
-            return False
-
-    def __put_result(self) -> int:
+    def __upload_result(self, output_format: str, json_data: dict) -> None:
         """
-        Upload results to the API broker.
-        All data is uploaded from memory.
+        Upload a single result (srt/json) to the API broker.
         """
-        header = {
-            "Content-Type": "application/json",
-        }
+        response = requests.put(
+            f"{self.api_url}/{self.user_id}/{self.uuid}/result",
+            json=json_data,
+            headers={"Content-Type": "application/json"},
+            cert=(settings.SSL_CERTFILE, settings.SSL_KEYFILE),
+        )
+        response.raise_for_status()
 
-        results = {}
-        if self.srt_data:
-            results["srt"] = {"result": self.srt_data, "format": "srt"}
-        if self.json_data:
-            results["json"] = {"result": self.json_data, "format": "json"}
+    def __put_result(self) -> bool:
+        """
+        Upload all results to the API broker in parallel.
+        """
+        futures = {}
 
-        for output_format, json_data in results.items():
-            try:
-                response = requests.put(
-                    f"{self.api_url}/{self.user_id}/{self.uuid}/result",
-                    json=json_data,
-                    headers=header,
-                    cert=(settings.SSL_CERTFILE, settings.SSL_KEYFILE),
-                )
-                response.raise_for_status()
-            except requests.RequestException as e:
-                self.logger.error(f"Error uploading {output_format}: {e}")
-                return False
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            if self.srt_data:
+                futures[pool.submit(
+                    self.__upload_result, "srt", {"result": self.srt_data, "format": "srt"}
+                )] = "srt"
+            if self.json_data:
+                futures[pool.submit(
+                    self.__upload_result, "json", {"result": self.json_data, "format": "json"}
+                )] = "json"
+            if self.mp4_data:
+                futures[pool.submit(self.__upload_mp4)] = "mp4"
 
-            self.logger.info(f"Uploaded {output_format} for job {self.uuid}")
-
-        if self.mp4_data:
-            try:
-                self.__upload_mp4(self.mp4_data)
-            except Exception as e:
-                self.logger.error(f"Error uploading mp4: {e}")
-                return False
-            self.logger.info(f"Uploaded mp4 for job {self.uuid}")
+            for future in as_completed(futures):
+                name = futures[future]
+                try:
+                    future.result()
+                    self.logger.info(f"Uploaded {name} for job {self.uuid}")
+                except Exception as e:
+                    self.logger.error(f"Error uploading {name}: {e}")
+                    return False
 
         return True
 
@@ -499,7 +487,6 @@ class TranscriptionJob:
         if not self.uuid:
             return
 
-        self.file_data = None
         self.wav_data = None
         self.srt_data = None
         self.json_data = None
