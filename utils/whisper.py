@@ -86,10 +86,12 @@ class WhisperAudioTranscriber:
         try:
             self.__model = whisper.load_model(self.__model_name, device=self.__device)
         except NotImplementedError:
-            logger.warning(f"Failed to load model on {self.__device}, falling back to CPU")
+            self.__logger.warning(f"Failed to load model on {self.__device}, falling back to CPU")
             self.__device = "cpu"
             self.__torch_dtype = torch.float32
             self.__model = whisper.load_model(self.__model_name, device=self.__device)
+
+        self.__logger.info(f"Loaded model '{self.__model_name}' on {self.__device}")
 
     def __decode_wav_bytes(self, wav_bytes: bytes) -> tuple:
         """
@@ -259,6 +261,7 @@ class WhisperAudioTranscriber:
             self.__model,
             audio,
             language=self.__language,
+            trust_whisper_timestamps=False,
         )
 
         return self.__process_transcription(result.get("segments", []))
