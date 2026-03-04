@@ -1,14 +1,11 @@
 import io
-import json
 import logging
-import os
-import re
 import requests
 import subprocess
 import tempfile
 import wave
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 from typing import Optional
 from utils import settings
@@ -40,7 +37,6 @@ class TranscriptionJob:
         self.logger = logger
         self.api_url = api_url
         self.hf_token = hf_token
-        self.speakers = 0
 
     def __enter__(self) -> "TranscriptionJob":
         """
@@ -51,7 +47,6 @@ class TranscriptionJob:
         self.language = None
         self.model_type = None
         self.model = None
-        self.filename = None
         self.speakers = 0
         self.mp4_data = None
         self.__temp_file = None
@@ -79,29 +74,38 @@ class TranscriptionJob:
         self.model_type = job.get("model_type")
         self.model = self.__get_model()
         self.speakers = job.get("speakers", 0)
-        self.filename = self.uuid
         self.output_format = job.get("output_format", "txt")
 
         if not self.speakers:
             self.speakers = 0
 
-        self.logger.info(f"Starting transcription job {self.uuid}")
-        self.logger.info(f"  User: {self.user_id}")
-        self.logger.info(f"  Language: {self.language}")
-        self.logger.info(f"  Model: {self.model}")
-        self.logger.info(f"  Model type: {self.model_type}")
-        self.logger.info(f"  Filename: {self.filename}")
-        self.logger.info(f"  Speakers: {self.speakers}")
-        self.logger.info(f"  Output format: {self.output_format}")
+        self.logger.info(
+            f"Job {self.uuid}: language={self.language}, model={self.model}, "
+            f"speakers={self.speakers}, format={self.output_format}"
+        )
 
-        self.logger.debug("Updating job status to IN_PROGRESS")
         self.__put_status(
             JobStatusEnum.IN_PROGRESS, error=None, transcribed_seconds=None
         )
 
-        self.logger.debug("Fetching file from API broker")
+        try:
+            return self.__process()
+        except Exception:
+            self.logger.exception(f"Job {self.uuid}: crashed")
+            self.__put_status(
+                JobStatusEnum.FAILED,
+                error="Internal error",
+                transcribed_seconds=None,
+            )
+            return False
+
+    def __process(self) -> bool:
+        """
+        Run the job pipeline: download, transcode, transcribe, upload.
+        """
+
         if not self.__get_file():
-            self.logger.error("File download failed")
+            self.logger.error(f"Job {self.uuid}: file download failed")
             self.__put_status(
                 JobStatusEnum.FAILED,
                 error="File download failed",
@@ -109,33 +113,30 @@ class TranscriptionJob:
             )
             return False
 
-        has_video = self.__has_video_stream()
+        if not self.__transcode_file():
+            self.logger.error(f"Job {self.uuid}: transcoding failed")
+            self.__put_status(
+                JobStatusEnum.FAILED,
+                error="Transcoding failed",
+                transcribed_seconds=None,
+            )
+            return False
 
-        # Run transcode + downscale/downsample in parallel
-        self.logger.debug("Transcoding and preparing preview in parallel")
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            transcode_future = pool.submit(self.__transcode_file)
-            if has_video:
-                preview_future = pool.submit(self.__downscale_video)
-                preview_label = "Downscaling"
-            else:
-                preview_future = pool.submit(self.__downsample_audio)
-                preview_label = "Audio downsampling"
-
-            if not transcode_future.result():
-                self.logger.error("Transcoding failed")
+        if self.__has_video_stream():
+            if not self.__downscale_video():
+                self.logger.error(f"Job {self.uuid}: downscaling failed")
                 self.__put_status(
                     JobStatusEnum.FAILED,
-                    error="Transcoding failed",
+                    error="Downscaling failed",
                     transcribed_seconds=None,
                 )
                 return False
-
-            if not preview_future.result():
-                self.logger.error(f"{preview_label} failed")
+        else:
+            if not self.__downsample_audio():
+                self.logger.error(f"Job {self.uuid}: audio downsampling failed")
                 self.__put_status(
                     JobStatusEnum.FAILED,
-                    error=f"{preview_label} failed",
+                    error="Audio downsampling failed",
                     transcribed_seconds=None,
                 )
                 return False
@@ -143,11 +144,10 @@ class TranscriptionJob:
         # Close the temp file (auto-deleted) before transcription.
         self.__close_temp_file()
 
-        self.logger.debug("Transcribing file")
         transcribed_seconds = self.__transcribe()
 
         if not transcribed_seconds:
-            self.logger.error("Transcription failed")
+            self.logger.error(f"Job {self.uuid}: transcription failed")
             self.__put_status(
                 JobStatusEnum.FAILED,
                 error="Transcription failed",
@@ -155,9 +155,8 @@ class TranscriptionJob:
             )
             return False
 
-        self.logger.debug("Uploading results to backend")
         if not self.__put_result():
-            self.logger.error("File upload failed")
+            self.logger.error(f"Job {self.uuid}: upload failed")
             self.__put_status(
                 JobStatusEnum.FAILED,
                 error="File upload failed",
@@ -165,12 +164,11 @@ class TranscriptionJob:
             )
             return False
 
-        self.logger.info(f"Job {self.uuid} completed successfully")
         self.__put_status(
             JobStatusEnum.COMPLETED, error=None, transcribed_seconds=transcribed_seconds
         )
         self.logger.info(
-            f"Transcription completed, total transcribed seconds: {transcribed_seconds}"
+            f"Job {self.uuid}: completed, {transcribed_seconds:.0f}s transcribed"
         )
 
         return True
@@ -179,7 +177,6 @@ class TranscriptionJob:
         """
         Transcribe the audio file using Hugging Face Whisper.
         """
-        self.logger.info("Starting transcription")
         transcriber = WhisperAudioTranscriber(
             self.logger,
             audio_data=self.wav_data,
@@ -199,7 +196,6 @@ class TranscriptionJob:
         if self.output_format == "txt":
             drz = transcriber.diarization()
             self.json_data = drz if drz else None
-            self.logger.debug(f"Diarization result keys: {list(drz.keys()) if drz else None}")
         else:
             self.json_data = None
 
@@ -207,57 +203,26 @@ class TranscriptionJob:
 
         return transcribed_seconds
 
-    def __run_cmd(self, command: list) -> bool:
-        """
-        Run a command using subprocess.run.
-        Raises an exception if the command fails.
-        """
-        try:
-            command_str = " ".join(command)
-            self.logger.debug(f"Executing command: {command_str}")
-            result = subprocess.run(command, capture_output=True)
-
-            if result.returncode != 0:
-                raise subprocess.CalledProcessError(
-                    returncode=result.returncode,
-                    cmd=command_str,
-                    output=result.stdout.decode(),
-                    stderr=result.stderr.decode(),
-                )
-        except Exception as e:
-            self.logger.error(f"Error when executing command: {e}")
-            raise e
-
-        return True
-
-    def __run_cmd_pipe(self, command: list, input_data: bytes = None, pass_fds: tuple = ()) -> bytes:
+    def __run_cmd_pipe(self, command: list, input_data: bytes = None) -> bytes:
         """
         Run a command, capturing stdout.
         Optionally pipes input_data to stdin.
-        Optionally passes file descriptors to the child process.
         """
-        try:
-            command_str = re.sub(r"/dev/fd/\d+", "<fd>", " ".join(command))
-            self.logger.debug(f"Executing piped command: {command_str}")
-            process = subprocess.Popen(
-                command,
-                stdin=subprocess.PIPE if input_data else None,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                pass_fds=pass_fds,
-            )
-            stdout, stderr = process.communicate(input=input_data)
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE if input_data else None,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        stdout, stderr = process.communicate(input=input_data)
 
-            if process.returncode != 0:
-                raise subprocess.CalledProcessError(
-                    returncode=process.returncode,
-                    cmd=command_str,
-                    output=None,
-                    stderr=stderr.decode(),
-                )
-        except Exception as e:
-            self.logger.error(f"Error when executing piped command: {e}")
-            raise e
+        if process.returncode != 0:
+            raise subprocess.CalledProcessError(
+                returncode=process.returncode,
+                cmd=" ".join(command),
+                output=None,
+                stderr=stderr.decode(),
+            )
 
         return stdout
 
@@ -266,7 +231,7 @@ class TranscriptionJob:
         Downscale videos to a smaller size.
         Output is captured in memory (self.mp4_data).
         """
-        input_path, fd = self.__ffmpeg_input_fd()
+        input_path = self.__ffmpeg_input_path()
         command = [
             settings.FFMPEG_PATH,
             "-nostdin",
@@ -302,13 +267,10 @@ class TranscriptionJob:
             "pipe:1",
         ]
         try:
-            self.mp4_data = self.__run_cmd_pipe(command, pass_fds=(fd,))
+            self.mp4_data = self.__run_cmd_pipe(command)
         except Exception as e:
             self.logger.error(f"Error during downscaling: {e}")
             return False
-        finally:
-            os.close(fd)
-
         return True
 
     def __downsample_audio(self) -> bool:
@@ -317,7 +279,7 @@ class TranscriptionJob:
         This ensures the same streaming support as video previews.
         Output is captured in memory (self.mp4_data).
         """
-        input_path, fd = self.__ffmpeg_input_fd()
+        input_path = self.__ffmpeg_input_path()
         command = [
             settings.FFMPEG_PATH,
             "-nostdin",
@@ -340,13 +302,10 @@ class TranscriptionJob:
             "pipe:1",
         ]
         try:
-            self.mp4_data = self.__run_cmd_pipe(command, pass_fds=(fd,))
+            self.mp4_data = self.__run_cmd_pipe(command)
         except Exception as e:
             self.logger.error(f"Error during audio downsampling: {e}")
             return False
-        finally:
-            os.close(fd)
-
         return True
 
     def __raw_pcm_to_wav(self, pcm_data: bytes, sample_rate: int = 16000, channels: int = 1, sample_width: int = 2) -> bytes:
@@ -365,7 +324,7 @@ class TranscriptionJob:
         """
         Probe the temp file with ffprobe to check for a video stream.
         """
-        input_path, fd = self.__ffmpeg_input_fd()
+        input_path = self.__ffmpeg_input_path()
         command = [
             "ffprobe",
             "-v", "quiet",
@@ -375,21 +334,16 @@ class TranscriptionJob:
             input_path,
         ]
         try:
-            output = self.__run_cmd_pipe(command, pass_fds=(fd,))
+            output = self.__run_cmd_pipe(command)
             return b"video" in output
         except Exception:
             return False
-        finally:
-            os.close(fd)
 
-    def __ffmpeg_input_fd(self) -> tuple:
+    def __ffmpeg_input_path(self) -> str:
         """
-        Create a duplicate fd (independently seekable) and return (path, fd).
-        Caller must close the fd after use.
+        Return the path to the temp file for ffmpeg input.
         """
-        fd = os.dup(self.__temp_file.fileno())
-        os.lseek(fd, 0, os.SEEK_SET)
-        return f"/dev/fd/{fd}", fd
+        return self.__temp_file.name
 
     def __close_temp_file(self):
         if self.__temp_file:
@@ -402,7 +356,7 @@ class TranscriptionJob:
         The transcoded format should be 16kHz mono signed 16-bit PCM.
         Raw PCM is piped to stdout, then wrapped in a WAV header in memory.
         """
-        input_path, fd = self.__ffmpeg_input_fd()
+        input_path = self.__ffmpeg_input_path()
         command = [
             settings.FFMPEG_PATH,
             "-nostdin",
@@ -419,14 +373,11 @@ class TranscriptionJob:
         ]
 
         try:
-            pcm_data = self.__run_cmd_pipe(command, pass_fds=(fd,))
+            pcm_data = self.__run_cmd_pipe(command)
             self.wav_data = self.__raw_pcm_to_wav(pcm_data)
         except Exception as e:
             self.logger.error(f"Error during transcoding: {e}")
             return False
-        finally:
-            os.close(fd)
-
         return True
 
     def __get_job(self) -> dict:
@@ -441,11 +392,9 @@ class TranscriptionJob:
             response.raise_for_status()
             job = response.json()["result"]
             if "status" in job and job["status"] != JobStatusEnum.IN_PROGRESS:
-                self.logger.info(f"Job {job['uuid']} is not in_progress. Skipping.")
                 return {}
 
-        except Exception as e:
-            self.logger.error(f"Error fetching next job: {e}")
+        except Exception:
             return {}
 
         return job
@@ -463,9 +412,10 @@ class TranscriptionJob:
             )
             response.raise_for_status()
 
-            self.__temp_file = tempfile.TemporaryFile()
+            self.__temp_file = tempfile.NamedTemporaryFile(delete=True)
             for chunk in response.iter_content(chunk_size=1024 * 1024):
                 self.__temp_file.write(chunk)
+            self.__temp_file.flush()
 
         except Exception as e:
             self.logger.error(f"Error downloading file: {e}")
@@ -516,8 +466,6 @@ class TranscriptionJob:
         """
         Upload a single result (srt/json) to the API broker.
         """
-        import json as json_module
-        self.logger.debug(f"Upload {output_format} payload: {json_module.dumps(json_data, default=str)[:500]}")
         response = requests.put(
             f"{self.api_url}/{self.user_id}/{self.uuid}/result",
             json=json_data,
@@ -540,17 +488,14 @@ class TranscriptionJob:
             media_future = pool.submit(self.__upload_media)
 
         try:
-            if self.output_format == "txt" and self.json_data:
-                import json as json_module
-                self.__upload_result("json", {"result": json_module.dumps(self.json_data), "format": "json"})
-                self.logger.info(f"Uploaded json for job {self.uuid}")
-            elif self.srt_data:
+            if self.srt_data:
                 self.__upload_result("srt", {"result": self.srt_data, "format": "srt"})
-                self.logger.info(f"Uploaded srt for job {self.uuid}")
+
+            if self.json_data:
+                self.__upload_result("json", {"result": self.json_data, "format": "json"})
 
             if media_future:
                 media_future.result()
-                self.logger.info(f"Uploaded media for job {self.uuid}")
         except Exception as e:
             self.logger.error(f"Error uploading results: {e}")
             return False

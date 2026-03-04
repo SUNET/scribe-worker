@@ -80,12 +80,15 @@ def mainloop(worker_id: int) -> None:
 
         sleep(sleep_time)
 
-        with TranscriptionJob(
-            logger,
-            api_url,
-            hf_token=settings.HF_TOKEN,
-        ) as job:
-            job.start()
+        try:
+            with TranscriptionJob(
+                logger,
+                api_url,
+                hf_token=settings.HF_TOKEN,
+            ) as job:
+                job.start()
+        except Exception:
+            logger.exception(f"[{worker_id}] Worker crashed, restarting loop")
 
 
 def main() -> None:
