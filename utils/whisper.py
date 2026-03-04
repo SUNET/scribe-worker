@@ -99,12 +99,13 @@ class WhisperAudioTranscriber:
         model_name = self.__model_name
 
         # If a specific revision is needed, download via huggingface_hub first
+        # and pass the local path to whisper-timestamped (bypasses its revision=None)
         if self.__revision and "/" in model_name:
             model_name = snapshot_download(
                 model_name,
                 revision=self.__revision,
             )
-            self.__logger.info(f"Downloaded '{self.__model_name}' revision '{self.__revision}'")
+            self.__logger.info(f"Using '{self.__model_name}' revision '{self.__revision}' from {model_name}")
 
         try:
             self.__model = whisper.load_model(model_name, device=self.__device)
