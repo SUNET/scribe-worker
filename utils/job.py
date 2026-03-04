@@ -54,7 +54,6 @@ class TranscriptionJob:
         self.filename = None
         self.speakers = 0
         self.mp4_data = None
-        self.mp3_data = None
         self.__temp_file = None
 
         return self
@@ -313,8 +312,9 @@ class TranscriptionJob:
 
     def __downsample_audio(self) -> bool:
         """
-        Downsample audio to a lightweight MP3 preview.
-        Output is captured in memory (self.mp3_data).
+        Downsample audio to a lightweight AAC stream in a fragmented MP4 container.
+        This ensures the same streaming support as video previews.
+        Output is captured in memory (self.mp4_data).
         """
         input_path, fd = self.__ffmpeg_input_fd()
         command = [
@@ -323,21 +323,23 @@ class TranscriptionJob:
             "-threads", "0",
             "-i",
             input_path,
+            "-vn",
             "-c:a",
-            "libmp3lame",
+            "aac",
             "-b:a",
             "64k",
             "-ar",
             "44100",
             "-ac",
             "1",
+            "-movflags",
+            "frag_keyframe+empty_moov+default_base_moof",
             "-f",
-            "mp3",
+            "mp4",
             "pipe:1",
         ]
         try:
-            self.mp3_data = self.__run_cmd_pipe(command, pass_fds=(fd,))
-            self.mp4_data = None
+            self.mp4_data = self.__run_cmd_pipe(command, pass_fds=(fd,))
         except Exception as e:
             self.logger.error(f"Error during audio downsampling: {e}")
             return False
@@ -496,27 +498,18 @@ class TranscriptionJob:
 
     def __upload_media(self) -> None:
         """
-        Upload the media preview (MP4 or MP3) to the API broker.
+        Upload the media preview (MP4) to the API broker.
         """
-        if self.mp4_data:
-            filename = f"{self.uuid}.mp4"
-            data = self.mp4_data
-            mime = "video/mp4"
-        elif self.mp3_data:
-            filename = f"{self.uuid}.mp3"
-            data = self.mp3_data
-            mime = "audio/mpeg"
-        else:
+        if not self.mp4_data:
             return
 
         response = requests.put(
             f"{self.api_url}/{self.user_id}/{self.uuid}/file",
-            files={"file": (filename, io.BytesIO(data), mime)},
+            files={"file": (f"{self.uuid}.mp4", io.BytesIO(self.mp4_data), "video/mp4")},
             cert=(settings.SSL_CERTFILE, settings.SSL_KEYFILE),
         )
         response.raise_for_status()
         self.mp4_data = None
-        self.mp3_data = None
 
     def __upload_result(self, output_format: str, json_data: dict) -> None:
         """
@@ -545,7 +538,7 @@ class TranscriptionJob:
                 futures[pool.submit(
                     self.__upload_result, "json", {"result": self.json_data, "format": "json"}
                 )] = "json"
-            if self.mp4_data or self.mp3_data:
+            if self.mp4_data:
                 futures[pool.submit(self.__upload_media)] = "media"
 
             for future in as_completed(futures):
@@ -578,7 +571,6 @@ class TranscriptionJob:
         self.srt_data = None
         self.json_data = None
         self.mp4_data = None
-        self.mp3_data = None
         self.__close_temp_file()
 
         return True
