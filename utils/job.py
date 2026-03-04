@@ -521,6 +521,8 @@ class TranscriptionJob:
             headers={"Content-Type": "application/json"},
             cert=(settings.SSL_CERTFILE, settings.SSL_KEYFILE),
         )
+        if response.status_code != 200:
+            self.logger.error(f"Upload {output_format} response: {response.text}")
         response.raise_for_status()
 
     def __put_result(self) -> bool:
