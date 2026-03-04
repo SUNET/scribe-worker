@@ -198,7 +198,8 @@ class TranscriptionJob:
 
         if self.output_format == "txt":
             drz = transcriber.diarization()
-            self.json_data = dict(drz) if drz else None
+            self.json_data = drz if drz else None
+            self.logger.debug(f"Diarization result keys: {list(drz.keys()) if drz else None}")
         else:
             self.json_data = None
 
@@ -527,30 +528,32 @@ class TranscriptionJob:
 
     def __put_result(self) -> bool:
         """
-        Upload all results to the API broker in parallel.
+        Upload results to the API broker.
+        SRT and JSON are uploaded sequentially (same endpoint),
+        media upload runs in parallel with the results.
         """
-        futures = {}
+        media_future = None
+        if self.mp4_data:
+            pool = ThreadPoolExecutor(max_workers=1)
+            media_future = pool.submit(self.__upload_media)
 
-        with ThreadPoolExecutor(max_workers=3) as pool:
-            if self.srt_data:
-                futures[pool.submit(
-                    self.__upload_result, "srt", {"result": self.srt_data, "format": "srt"}
-                )] = "srt"
-            if self.json_data:
-                futures[pool.submit(
-                    self.__upload_result, "json", {"result": self.json_data, "format": self.output_format}
-                )] = "json"
-            if self.mp4_data:
-                futures[pool.submit(self.__upload_media)] = "media"
+        try:
+            if self.output_format == "txt" and self.json_data:
+                self.__upload_result("json", {"result": self.json_data, "format": "json"})
+                self.logger.info(f"Uploaded json for job {self.uuid}")
+            elif self.srt_data:
+                self.__upload_result("srt", {"result": self.srt_data, "format": "srt"})
+                self.logger.info(f"Uploaded srt for job {self.uuid}")
 
-            for future in as_completed(futures):
-                name = futures[future]
-                try:
-                    future.result()
-                    self.logger.info(f"Uploaded {name} for job {self.uuid}")
-                except Exception as e:
-                    self.logger.error(f"Error uploading {name}: {e}")
-                    return False
+            if media_future:
+                media_future.result()
+                self.logger.info(f"Uploaded media for job {self.uuid}")
+        except Exception as e:
+            self.logger.error(f"Error uploading results: {e}")
+            return False
+        finally:
+            if media_future:
+                pool.shutdown(wait=False)
 
         return True
 
