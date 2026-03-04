@@ -10,7 +10,7 @@ def get_logger():
     """
 
     logger = logging.getLogger(__name__)
-    _, _, _, _, debug, logfile, _ = parse_arguments()
+    _, _, _, _, debug, logfile, _, _ = parse_arguments()
 
     if not logger.hasHandlers():
         formatter = logging.Formatter(

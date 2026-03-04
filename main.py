@@ -15,9 +15,9 @@ from utils.settings import get_settings
 mp.set_start_method("spawn", force=True)
 settings = get_settings()
 logger = get_logger()
-foreground, pidfile, zap, _, _, _, no_healthcheck = parse_arguments()
+foreground, pidfile, zap, _, _, _, no_healthcheck, download = parse_arguments()
 
-if not zap:
+if not zap and not download:
     from utils.job import TranscriptionJob
 
 
@@ -138,8 +138,39 @@ def daemon_running() -> None:
     sys.exit(1)
 
 
+def download_models() -> None:
+    """Download all configured whisper models."""
+    import whisper_timestamped as whisper
+    from huggingface_hub import snapshot_download
+
+    models = set()
+    for lang_models in settings.WHISPER_MODELS_HF.values():
+        for model_name in lang_models.values():
+            models.add(model_name)
+
+    for model_name in sorted(models):
+        revision = None
+        if "@" in model_name:
+            model_name, revision = model_name.rsplit("@", 1)
+
+        print(f"Downloading '{model_name}'" + (f" (revision: {revision})" if revision else "") + "...")
+
+        if "/" in model_name and revision:
+            snapshot_download(model_name, revision=revision)
+        elif "/" in model_name:
+            snapshot_download(model_name)
+        else:
+            whisper.load_model(model_name, device="cpu")
+
+        print(f"  Done.")
+
+    print("\nAll models downloaded.")
+
+
 if __name__ == "__main__":
-    if zap:
+    if download:
+        download_models()
+    elif zap:
         daemon_kill()
     elif foreground:
         daemon_running()

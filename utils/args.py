@@ -47,6 +47,12 @@ def parse_arguments() -> tuple:
         help="Disable healthcheck thread.",
     )
 
+    parser.add_argument(
+        "--download",
+        action="store_true",
+        help="Download all configured models and exit.",
+    )
+
     args = parser.parse_args()
 
     return (
@@ -57,4 +63,5 @@ def parse_arguments() -> tuple:
         args.debug,
         args.logfile,
         args.no_healthcheck,
+        args.download,
     )
