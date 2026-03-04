@@ -124,8 +124,8 @@ class WhisperAudioTranscriber:
             if not text:
                 continue
 
-            start_time = segment["start"]
-            end_time = segment["end"]
+            start_time = float(segment["start"])
+            end_time = float(segment["end"])
 
             if full_transcription and not full_transcription.endswith(" "):
                 full_transcription += " "
@@ -140,9 +140,9 @@ class WhisperAudioTranscriber:
             avg_score = None
             words = segment.get("words", [])
             if words:
-                confidences = [w.get("confidence", 0) for w in words if w.get("text", "").strip()]
+                confidences = [float(w.get("confidence", 0)) for w in words if w.get("text", "").strip()]
                 if confidences:
-                    avg_score = round(sum(confidences) / len(confidences), 4)
+                    avg_score = round(float(sum(confidences) / len(confidences)), 4)
 
             if len(text) > 90:
                 mid_index = len(text) // 2
