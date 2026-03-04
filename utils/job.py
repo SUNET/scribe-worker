@@ -20,6 +20,7 @@ import logging
 import requests
 import subprocess
 import tempfile
+import time
 import wave
 
 from concurrent.futures import ThreadPoolExecutor
@@ -116,12 +117,21 @@ class TranscriptionJob:
             )
             return False
 
+    def __timed(self, label: str, func, *args, **kwargs):
+        """Run func and log elapsed time at debug level."""
+        t0 = time.monotonic()
+        result = func(*args, **kwargs)
+        elapsed = time.monotonic() - t0
+        self.logger.debug(f"Job {self.uuid}: {label} took {elapsed:.2f}s")
+        return result
+
     def __process(self) -> bool:
         """
         Run the job pipeline: download, transcode, transcribe, upload.
         """
+        t0 = time.monotonic()
 
-        if not self.__get_file():
+        if not self.__timed("download", self.__get_file):
             self.logger.error(f"Job {self.uuid}: file download failed")
             self.__put_status(
                 JobStatusEnum.FAILED,
@@ -130,7 +140,7 @@ class TranscriptionJob:
             )
             return False
 
-        if not self.__transcode_file():
+        if not self.__timed("transcode", self.__transcode_file):
             self.logger.error(f"Job {self.uuid}: transcoding failed")
             self.__put_status(
                 JobStatusEnum.FAILED,
@@ -140,7 +150,7 @@ class TranscriptionJob:
             return False
 
         if self.__has_video_stream():
-            if not self.__downscale_video():
+            if not self.__timed("downscale", self.__downscale_video):
                 self.logger.error(f"Job {self.uuid}: downscaling failed")
                 self.__put_status(
                     JobStatusEnum.FAILED,
@@ -149,7 +159,7 @@ class TranscriptionJob:
                 )
                 return False
         else:
-            if not self.__downsample_audio():
+            if not self.__timed("downsample", self.__downsample_audio):
                 self.logger.error(f"Job {self.uuid}: audio downsampling failed")
                 self.__put_status(
                     JobStatusEnum.FAILED,
@@ -161,7 +171,7 @@ class TranscriptionJob:
         # Close the temp file (auto-deleted) before transcription.
         self.__close_temp_file()
 
-        transcribed_seconds = self.__transcribe()
+        transcribed_seconds = self.__timed("transcribe", self.__transcribe)
 
         if not transcribed_seconds:
             self.logger.error(f"Job {self.uuid}: transcription failed")
@@ -172,7 +182,7 @@ class TranscriptionJob:
             )
             return False
 
-        if not self.__put_result():
+        if not self.__timed("upload", self.__put_result):
             self.logger.error(f"Job {self.uuid}: upload failed")
             self.__put_status(
                 JobStatusEnum.FAILED,
@@ -184,8 +194,9 @@ class TranscriptionJob:
         self.__put_status(
             JobStatusEnum.COMPLETED, error=None, transcribed_seconds=transcribed_seconds
         )
+        elapsed = time.monotonic() - t0
         self.logger.info(
-            f"Job {self.uuid}: completed, {transcribed_seconds:.0f}s transcribed"
+            f"Job {self.uuid}: completed, {transcribed_seconds:.0f}s transcribed in {elapsed:.1f}s"
         )
 
         return True

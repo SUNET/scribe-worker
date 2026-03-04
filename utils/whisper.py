@@ -19,6 +19,7 @@ import io
 import logging
 import numpy as np
 import os
+import time
 import torch
 import warnings
 import wave
@@ -283,11 +284,14 @@ class WhisperAudioTranscriber:
         return converted
 
     def __transcribe_audio(self, filepath: Optional[str] = None) -> dict:
+        t0 = time.monotonic()
         if self.__audio_data:
             audio, _ = self.__decode_wav_bytes(self.__audio_data)
         else:
             audio = whisper.load_audio(filepath)
+        self.__logger.debug(f"Audio decode took {time.monotonic() - t0:.2f}s")
 
+        t0 = time.monotonic()
         result = whisper.transcribe(
             self.__model,
             audio,
@@ -297,6 +301,7 @@ class WhisperAudioTranscriber:
             condition_on_previous_text=False,
             fp16=self.__device != "cpu",
         )
+        self.__logger.debug(f"Whisper inference took {time.monotonic() - t0:.2f}s")
 
         return self.__process_transcription(result.get("segments", []))
 
@@ -360,12 +365,14 @@ class WhisperAudioTranscriber:
         else:
             audio_input = self.__audio_path
 
+        t0 = time.monotonic()
         diarization = self.__diarization_pipeline(
             audio_input,
             num_speakers=int(self.__speakers),
             min_speakers=min_speakers,
             max_speakers=max_speakers,
         )
+        self.__logger.debug(f"Diarization inference took {time.monotonic() - t0:.2f}s")
 
         aligned_segments = self.__align_speakers(self.__result["chunks"], diarization)
 
