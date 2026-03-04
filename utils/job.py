@@ -1,6 +1,7 @@
 import io
 import json
 import logging
+import os
 import re
 import requests
 import subprocess
@@ -52,6 +53,8 @@ class TranscriptionJob:
         self.model = None
         self.filename = None
         self.speakers = 0
+        self.mp4_data = None
+        self.mp3_data = None
         self.__temp_file = None
 
         return self
@@ -107,33 +110,33 @@ class TranscriptionJob:
             )
             return False
 
-        self.logger.debug("Transcoding file")
-        if not self.__transcode_file():
-            self.logger.error("Transcoding failed")
-            self.__put_status(
-                JobStatusEnum.FAILED,
-                error="Transcoding failed",
-                transcribed_seconds=None,
-            )
-            return False
+        has_video = self.__has_video_stream()
 
-        if self.__has_video_stream():
-            self.logger.debug("Downscaling video")
-            if not self.__downscale_video():
-                self.logger.error("Downscaling failed")
+        # Run transcode + downscale/downsample in parallel
+        self.logger.debug("Transcoding and preparing preview in parallel")
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            transcode_future = pool.submit(self.__transcode_file)
+            if has_video:
+                preview_future = pool.submit(self.__downscale_video)
+                preview_label = "Downscaling"
+            else:
+                preview_future = pool.submit(self.__downsample_audio)
+                preview_label = "Audio downsampling"
+
+            if not transcode_future.result():
+                self.logger.error("Transcoding failed")
                 self.__put_status(
                     JobStatusEnum.FAILED,
-                    error="Downscaling failed",
+                    error="Transcoding failed",
                     transcribed_seconds=None,
                 )
                 return False
-        else:
-            self.logger.debug("Downsampling audio")
-            if not self.__downsample_audio():
-                self.logger.error("Audio downsampling failed")
+
+            if not preview_future.result():
+                self.logger.error(f"{preview_label} failed")
                 self.__put_status(
                     JobStatusEnum.FAILED,
-                    error="Audio downsampling failed",
+                    error=f"{preview_label} failed",
                     transcribed_seconds=None,
                 )
                 return False
@@ -263,14 +266,13 @@ class TranscriptionJob:
         Downscale videos to a smaller size.
         Output is captured in memory (self.mp4_data).
         """
-        self.__temp_file.seek(0)
-        fd = self.__temp_file.fileno()
+        input_path, fd = self.__ffmpeg_input_fd()
         command = [
             settings.FFMPEG_PATH,
             "-nostdin",
             "-threads", "0",
             "-i",
-            self.__ffmpeg_input_path(),
+            input_path,
             "-vf",
             "scale=-2:240:flags=bilinear",
             "-c:v",
@@ -304,6 +306,8 @@ class TranscriptionJob:
         except Exception as e:
             self.logger.error(f"Error during downscaling: {e}")
             return False
+        finally:
+            os.close(fd)
 
         return True
 
@@ -312,14 +316,13 @@ class TranscriptionJob:
         Downsample audio to a lightweight MP3 preview.
         Output is captured in memory (self.mp3_data).
         """
-        self.__temp_file.seek(0)
-        fd = self.__temp_file.fileno()
+        input_path, fd = self.__ffmpeg_input_fd()
         command = [
             settings.FFMPEG_PATH,
             "-nostdin",
             "-threads", "0",
             "-i",
-            self.__ffmpeg_input_path(),
+            input_path,
             "-c:a",
             "libmp3lame",
             "-b:a",
@@ -338,6 +341,8 @@ class TranscriptionJob:
         except Exception as e:
             self.logger.error(f"Error during audio downsampling: {e}")
             return False
+        finally:
+            os.close(fd)
 
         return True
 
@@ -357,27 +362,31 @@ class TranscriptionJob:
         """
         Probe the temp file with ffprobe to check for a video stream.
         """
-        self.__temp_file.seek(0)
-        fd = self.__temp_file.fileno()
+        input_path, fd = self.__ffmpeg_input_fd()
         command = [
             "ffprobe",
             "-v", "quiet",
             "-select_streams", "v",
             "-show_entries", "stream=codec_type",
             "-of", "csv=p=0",
-            self.__ffmpeg_input_path(),
+            input_path,
         ]
         try:
             output = self.__run_cmd_pipe(command, pass_fds=(fd,))
             return b"video" in output
         except Exception:
             return False
+        finally:
+            os.close(fd)
 
-    def __ffmpeg_input_path(self) -> str:
+    def __ffmpeg_input_fd(self) -> tuple:
         """
-        Return /dev/fd/N path for the seekable temp file descriptor.
+        Create a duplicate fd (independently seekable) and return (path, fd).
+        Caller must close the fd after use.
         """
-        return f"/dev/fd/{self.__temp_file.fileno()}"
+        fd = os.dup(self.__temp_file.fileno())
+        os.lseek(fd, 0, os.SEEK_SET)
+        return f"/dev/fd/{fd}", fd
 
     def __close_temp_file(self):
         if self.__temp_file:
@@ -390,14 +399,13 @@ class TranscriptionJob:
         The transcoded format should be 16kHz mono signed 16-bit PCM.
         Raw PCM is piped to stdout, then wrapped in a WAV header in memory.
         """
-        self.__temp_file.seek(0)
-        fd = self.__temp_file.fileno()
+        input_path, fd = self.__ffmpeg_input_fd()
         command = [
             settings.FFMPEG_PATH,
             "-nostdin",
             "-threads", "0",
             "-i",
-            self.__ffmpeg_input_path(),
+            input_path,
             "-ar",
             "16000",
             "-ac",
@@ -413,6 +421,8 @@ class TranscriptionJob:
         except Exception as e:
             self.logger.error(f"Error during transcoding: {e}")
             return False
+        finally:
+            os.close(fd)
 
         return True
 
@@ -492,10 +502,12 @@ class TranscriptionJob:
             filename = f"{self.uuid}.mp4"
             data = self.mp4_data
             mime = "video/mp4"
-        else:
+        elif self.mp3_data:
             filename = f"{self.uuid}.mp3"
             data = self.mp3_data
             mime = "audio/mpeg"
+        else:
+            return
 
         response = requests.put(
             f"{self.api_url}/{self.user_id}/{self.uuid}/file",
