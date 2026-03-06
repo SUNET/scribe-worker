@@ -55,8 +55,75 @@ class Settings(BaseSettings):
     SSL_CERTFILE: str = ""
     SSL_KEYFILE: str = ""
 
+    # whisper.cpp path
+    WHISPER_CPP_PATH: str = "whisper-cli"
+
+    # Path to JSON file with whisper.cpp models
+    WHISPER_MODELS_CPP_FILE: str = ""
+
     # Path to JSON file with whisper HF models (optional override)
     WHISPER_MODELS_HF_FILE: str = ""
+
+    # Mapping between language and model
+    # These are used if no file is supplied
+    WHISPER_MODELS_CPP: ClassVar[dict[str, dict[str, str]]] = {
+        "Swedish": {
+            "fast transcription (normal accuracy)": "sv_base.bin",
+            "slower transcription (higher accuracy)": "sv_large.bin",
+        },
+        "English": {
+            "fast transcription (normal accuracy)": "whisper_base.bin",
+            "slower transcription (higher accuracy)": "whisper_large.bin",
+        },
+        "Finnish": {
+            "fast transcription (normal accuracy)": "whisper_base.bin",
+            "slower transcription (higher accuracy)": "whisper_large.bin",
+        },
+        "Danish": {
+            "fast transcription (normal accuracy)": "whisper_base.bin",
+            "slower transcription (higher accuracy)": "dk_large.bin",
+        },
+        "Norwegian": {
+            "fast transcription (normal accuracy)": "no_base.bin",
+            "slower transcription (higher accuracy)": "no_large.bin",
+        },
+        "French": {
+            "fast transcription (normal accuracy)": "whisper_base.bin",
+            "slower transcription (higher accuracy)": "whisper_large.bin",
+        },
+        "German": {
+            "fast transcription (normal accuracy)": "whisper_base.bin",
+            "slower transcription (higher accuracy)": "whisper_large.bin",
+        },
+        "Spanish": {
+            "fast transcription (normal accuracy)": "whisper_base.bin",
+            "slower transcription (higher accuracy)": "whisper_large.bin",
+        },
+        "Italian": {
+            "fast transcription (normal accuracy)": "whisper_base.bin",
+            "slower transcription (higher accuracy)": "whisper_large.bin",
+        },
+        "Russian": {
+            "fast transcription (normal accuracy)": "whisper_base.bin",
+            "slower transcription (higher accuracy)": "whisper_large.bin",
+        },
+        "Ukrainian": {
+            "fast transcription (normal accuracy)": "whisper_base.bin",
+            "slower transcription (higher accuracy)": "whisper_large.bin",
+        },
+        "Portuguese": {
+            "fast transcription (normal accuracy)": "whisper_base.bin",
+            "slower transcription (higher accuracy)": "whisper_large.bin",
+        },
+        "Dutch": {
+            "fast transcription (normal accuracy)": "whisper_base.bin",
+            "slower transcription (higher accuracy)": "whisper_large.bin",
+        },
+        "Icelandic": {
+            "fast transcription (normal accuracy)": "whisper_base.bin",
+            "slower transcription (higher accuracy)": "whisper_large.bin",
+        },
+    }
 
     WHISPER_MODELS_HF: ClassVar[dict[str, dict[str, str]]] = {
         "Swedish": {
