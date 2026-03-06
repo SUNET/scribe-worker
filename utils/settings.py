@@ -116,6 +116,10 @@ class Settings(BaseSettings):
             "fast transcription (normal accuracy)": "whisper_base.bin",
             "slower transcription (higher accuracy)": "whisper_large.bin",
         },
+        "Icelandic": {
+            "fast transcription (normal accuracy)": "whisper_base.bin",
+            "slower transcription (higher accuracy)": "whisper_large.bin",
+        },
     }
 
     WHISPER_MODELS_HF: ClassVar[dict[str, dict[str, str]]] = {
