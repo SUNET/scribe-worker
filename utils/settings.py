@@ -1,8 +1,9 @@
 import json
-from pathlib import Path
+
 from functools import lru_cache
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pathlib import Path
 from pydantic import model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import ClassVar
 from utils.args import parse_arguments
 
@@ -38,60 +39,46 @@ class Settings(BaseSettings):
 
     WHISPER_MODELS_HF: ClassVar[dict[str, dict[str, str]]] = {
         "Swedish": {
-            "fast transcription (normal accuracy)": "kblab/kb-whisper-base",
             "slower transcription (higher accuracy)": "kblab/kb-whisper-large",
         },
         "Swedish (verbatim)": {
-            "fast transcription (normal accuracy)": "kblab/kb-whisper-base@strict",
             "slower transcription (higher accuracy)": "kblab/kb-whisper-large@strict",
         },
         "English": {
-            "fast transcription (normal accuracy)": "base.en",
-            "slower transcription (higher accuracy)": "large-v3",
+            "slower transcription (higher accuracy)": "openai/whisper-large-v3",
         },
         "Finnish": {
-            "fast transcription (normal accuracy)": "base",
-            "slower transcription (higher accuracy)": "large-v3",
+            "slower transcription (higher accuracy)": "openai/whisper-large-v3",
         },
         "Danish": {
-            "fast transcription (normal accuracy)": "base",
-            "slower transcription (higher accuracy)": "large-v3",
+            "slower transcription (higher accuracy)": "openai/whisper-large-v3",
         },
         "Norwegian": {
-            "fast transcription (normal accuracy)": "base",
-            "slower transcription (higher accuracy)": "large-v3",
+            "slower transcription (higher accuracy)": "openai/whisper-large-v3",
         },
         "French": {
-            "fast transcription (normal accuracy)": "base",
-            "slower transcription (higher accuracy)": "large-v3",
+            "slower transcription (higher accuracy)": "openai/whisper-large-v3",
         },
         "German": {
-            "fast transcription (normal accuracy)": "base",
-            "slower transcription (higher accuracy)": "large-v3",
+            "slower transcription (higher accuracy)": "openai/whisper-large-v3",
         },
         "Spanish": {
-            "fast transcription (normal accuracy)": "base",
-            "slower transcription (higher accuracy)": "large-v3",
+            "slower transcription (higher accuracy)": "openai/whisper-large-v3",
         },
         "Italian": {
-            "fast transcription (normal accuracy)": "base",
-            "slower transcription (higher accuracy)": "large-v3",
+            "slower transcription (higher accuracy)": "openai/whisper-large-v3",
         },
         "Russian": {
-            "fast transcription (normal accuracy)": "base",
-            "slower transcription (higher accuracy)": "large-v3",
+            "slower transcription (higher accuracy)": "openai/whisper-large-v3",
         },
         "Ukrainian": {
-            "fast transcription (normal accuracy)": "base",
-            "slower transcription (higher accuracy)": "large-v3",
+            "slower transcription (higher accuracy)": "openai/whisper-large-v3",
         },
         "Portuguese": {
-            "fast transcription (normal accuracy)": "base",
-            "slower transcription (higher accuracy)": "large-v3",
+            "slower transcription (higher accuracy)": "openai/whisper-large-v3",
         },
         "Dutch": {
-            "fast transcription (normal accuracy)": "base",
-            "slower transcription (higher accuracy)": "large-v3",
+            "slower transcription (higher accuracy)": "openai/whisper-large-v3",
         },
     }
 
@@ -104,9 +91,7 @@ class Settings(BaseSettings):
         if not path.exists():
             return self
 
-        self.__class__.WHISPER_MODELS_HF = json.loads(
-            path.read_text(encoding="utf-8")
-        )
+        self.__class__.WHISPER_MODELS_HF = json.loads(path.read_text(encoding="utf-8"))
         return self
 
 
