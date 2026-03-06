@@ -1,6 +1,6 @@
 # Copyright (c) 2025-2026 Sunet.
 # Contributor: Kristofer Hallin
-
+#
 # This file is part of Sunet Scribe.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
