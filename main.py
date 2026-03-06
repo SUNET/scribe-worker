@@ -22,12 +22,16 @@ import psutil
 import requests
 import sys
 
+import whisper_timestamped as whisper
+
 from daemonize import Daemonize
+from huggingface_hub import snapshot_download
 from random import randint
 from time import sleep
 from utils.args import parse_arguments
 from utils.log import get_fileno, get_logger
 from utils.settings import get_settings
+
 
 mp.set_start_method("spawn", force=True)
 settings = get_settings()
@@ -161,29 +165,44 @@ def daemon_running() -> None:
 
 def download_models() -> None:
     """Download all configured whisper models."""
-    import whisper_timestamped as whisper
-    from huggingface_hub import snapshot_download
+    if settings.HF_TOKEN:
+        os.environ["HF_TOKEN"] = settings.HF_TOKEN
 
     models = set()
+
     for lang_models in settings.WHISPER_MODELS_HF.values():
         for model_name in lang_models.values():
             models.add(model_name)
+
+    print(sorted(models))
 
     for model_name in sorted(models):
         revision = None
         if "@" in model_name:
             model_name, revision = model_name.rsplit("@", 1)
 
-        print(f"Downloading '{model_name}'" + (f" (revision: {revision})" if revision else "") + "...")
+        print(
+            f"Downloading '{model_name}'"
+            + (f" (revision: {revision})" if revision else "")
+            + "..."
+        )
 
-        if "/" in model_name and revision:
-            snapshot_download(model_name, revision=revision)
-        elif "/" in model_name:
-            snapshot_download(model_name)
+        if "/" in model_name:
+            kwargs = {"repo_id": model_name}
+            if revision:
+                kwargs["revision"] = revision
+            kwargs["allow_patterns"] = [
+                "*.json",
+                "*.txt",
+                "*.model",
+                "*.safetensors",
+                "*.bin",
+            ]
+            snapshot_download(**kwargs)
         else:
             whisper.load_model(model_name, device="cpu")
 
-        print(f"  Done.")
+        print("  Done.")
 
     print("\nAll models downloaded.")
 

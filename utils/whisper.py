@@ -87,7 +87,11 @@ def load_whisper_model(model_name: str, logger: logging.Logger) -> object:
     # If a specific revision is needed, download via huggingface_hub first
     # and pass the local path to whisper-timestamped (bypasses its revision=None)
     if revision and "/" in load_name:
-        load_name = snapshot_download(load_name, revision=revision)
+        load_name = snapshot_download(
+            load_name,
+            revision=revision,
+            allow_patterns=["*.json", "*.txt", "*.model", "*.safetensors", "*.bin"],
+        )
         logger.info(f"Using '{model_name}' revision '{revision}' from {load_name}")
 
     try:
@@ -502,6 +506,10 @@ class WhisperAudioTranscriber:
 
         first_line = caption[: current_position + 1].strip()
         second_line = caption[current_position + 1 :].strip()
+
+        if len(first_line) <= 1 or len(second_line) <= 1:
+            return caption
+
         new_caption = f"{first_line}\n{second_line}"
 
         return new_caption
