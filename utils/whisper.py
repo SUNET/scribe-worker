@@ -30,6 +30,7 @@ from utils.settings import get_settings
 
 settings = get_settings()
 
+os.environ["PYANNOTE_METRICS_ENABLED"] = "false"
 
 def get_torch_device() -> tuple:
     """
