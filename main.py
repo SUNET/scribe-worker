@@ -33,7 +33,7 @@ mp.set_start_method("spawn", force=True)
 settings = get_settings()
 logger = get_logger()
 foreground, pidfile, zap, _, _, _, no_healthcheck = parse_arguments()
-os.environ["PYANNOTE_METRICS_ENABLED"] = "false"
+os.environ["PYANNOTE_METRICS_ENABLED"] = "0"
 
 if not zap:
     from utils.job import TranscriptionJob
