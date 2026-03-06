@@ -42,7 +42,7 @@ class Settings(BaseSettings):
 
     DEBUG: bool = True
     WORKERS: int = 2
-    FILE_STORAGE_DIR: str = "/storage"
+    FILE_STORAGE_DIR: str = "./storage"
     API_BACKEND_URL: str = ""
     API_VERSION: str = "v1"
     FFMPEG_PATH: str = "ffmpeg"
