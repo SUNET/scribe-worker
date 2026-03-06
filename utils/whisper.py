@@ -24,6 +24,7 @@ import uuid
 
 from pathlib import Path
 from pyannote.audio import Pipeline
+from pyannote.audio.telemetry import set_telemetry_metrics
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
 from typing import Optional
 from utils.settings import get_settings
@@ -31,6 +32,7 @@ from utils.settings import get_settings
 settings = get_settings()
 
 os.environ["PYANNOTE_METRICS_ENABLED"] = "0"
+set_telemetry_metrics(False, save_choice_as_default=True)
 
 def get_torch_device() -> tuple:
     """
