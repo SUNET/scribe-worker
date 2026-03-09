@@ -53,19 +53,27 @@ def get_torch_device() -> tuple:
         return "cpu", torch.float32
 
 
+_model_cache: dict[str, object] = {}
+_diarization_cache: Optional[Pipeline] = None
+
+
 def diarization_init(hf_token: str) -> Optional[Pipeline]:
     """
     Initializes the diarization pipeline using HuggingFace's PyAnnote.
     Uses the community version for better performance.
+    Returns cached pipeline if already loaded.
     """
+    global _diarization_cache
+    if _diarization_cache is not None:
+        return _diarization_cache
+
     device, _ = get_torch_device()
 
-    return Pipeline.from_pretrained(
+    _diarization_cache = Pipeline.from_pretrained(
         "pyannote/speaker-diarization-community-1", token=hf_token
     ).to(torch.device(device))
 
-
-_model_cache: dict[str, object] = {}
+    return _diarization_cache
 
 
 def load_whisper_model(model_name: str, logger: logging.Logger) -> object:
