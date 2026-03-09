@@ -25,14 +25,13 @@ import warnings
 import wave
 import whisper_timestamped as whisper
 
-warnings.filterwarnings("ignore", module="pyannote")
-
 from huggingface_hub import snapshot_download
 from pyannote.audio import Pipeline
 from pyannote.audio.telemetry import set_telemetry_metrics
 from typing import Optional
 from utils.settings import get_settings
 
+warnings.filterwarnings("ignore", module="pyannote")
 settings = get_settings()
 
 if settings.HF_TOKEN:
@@ -122,7 +121,9 @@ class WhisperAudioTranscriber:
         self.__audio_data = audio_data
         self.__hf_token = hf_token
         self.__device, _ = get_torch_device()
-        self.__language = language.split("(")[0].strip().lower() if language else language
+        self.__language = (
+            language.split("(")[0].strip().lower() if language else language
+        )
         self.__result = None
         self.__logger = logger
         self.__speakers = speakers
@@ -194,7 +195,11 @@ class WhisperAudioTranscriber:
             avg_score = None
             words = segment.get("words", [])
             if words:
-                confidences = [float(w.get("confidence", 0)) for w in words if w.get("text", "").strip()]
+                confidences = [
+                    float(w.get("confidence", 0))
+                    for w in words
+                    if w.get("text", "").strip()
+                ]
                 if confidences:
                     avg_score = round(float(sum(confidences) / len(confidences)), 4)
 
@@ -283,7 +288,9 @@ class WhisperAudioTranscriber:
         }
 
         self.__result = converted
-        self.__transcribed_seconds = processed_segments[-1]["end"] if processed_segments else 0
+        self.__transcribed_seconds = (
+            processed_segments[-1]["end"] if processed_segments else 0
+        )
 
         return converted
 
@@ -301,11 +308,20 @@ class WhisperAudioTranscriber:
             audio,
             language=self.__language,
             vad=True,
-            beam_size=1,
+            temperature=0.0,
             condition_on_previous_text=False,
             fp16=self.__device != "cpu",
+            compute_word_confidence=False,
+            refine_whisper_precision=0,
+            trust_whisper_timestamps=True,
         )
-        self.__logger.debug(f"Whisper inference took {time.monotonic() - t0:.2f}s")
+        elapsed = time.monotonic() - t0
+        audio_duration = len(audio) / 16000
+        rtf = elapsed / audio_duration if audio_duration > 0 else 0
+        self.__logger.info(
+            f"Whisper inference took {elapsed:.2f}s for {audio_duration:.1f}s audio ({1/rtf:.1f}x realtime)"
+            if rtf > 0 else f"Whisper inference took {elapsed:.2f}s"
+        )
 
         return self.__process_transcription(result.get("segments", []))
 
