@@ -285,18 +285,38 @@ class WhisperAudioTranscriber:
         self.__logger.debug(f"Audio decode took {time.monotonic() - t0:.2f}s")
 
         t0 = time.monotonic()
-        result = whisper.transcribe(
-            self.__model,
-            audio,
-            language=self.__language,
-            vad=True,
-            temperature=0.0,
-            condition_on_previous_text=False,
-            fp16=self.__device != "cpu",
-            compute_word_confidence=False,
-            refine_whisper_precision=0,
-            trust_whisper_timestamps=True,
-        )
+        try:
+            result = whisper.transcribe(
+                self.__model,
+                audio,
+                language=self.__language,
+                vad=True,
+                temperature=0.0,
+                condition_on_previous_text=False,
+                fp16=self.__device != "cpu",
+                compute_word_confidence=False,
+                refine_whisper_precision=0,
+                trust_whisper_timestamps=True,
+                verbose=False,
+            )
+        except AssertionError:
+            self.__logger.warning(
+                "Efficient path failed, falling back to naive approach"
+            )
+            result = whisper.transcribe(
+                self.__model,
+                audio,
+                language=self.__language,
+                vad=True,
+                temperature=0.0,
+                beam_size=1,
+                condition_on_previous_text=False,
+                fp16=self.__device != "cpu",
+                compute_word_confidence=False,
+                refine_whisper_precision=0,
+                trust_whisper_timestamps=True,
+                verbose=False,
+            )
         elapsed = time.monotonic() - t0
         audio_duration = len(audio) / 16000
         rtf = elapsed / audio_duration if audio_duration > 0 else 0
