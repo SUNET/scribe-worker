@@ -1,9 +1,11 @@
+import gc
 import io
 import logging
 import requests
 import subprocess
 import tempfile
 import time
+import torch
 import wave
 
 from concurrent.futures import ThreadPoolExecutor
@@ -536,5 +538,9 @@ class TranscriptionJob:
         self.json_data = None
         self.mp4_data = None
         self.__close_temp_file()
+
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         return True
