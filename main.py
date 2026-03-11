@@ -20,6 +20,7 @@ import multiprocessing as mp
 import os
 import psutil
 import requests
+import signal
 import sys
 
 import whisper_timestamped as whisper
@@ -43,7 +44,13 @@ if not zap and not download:
     from utils.job import TranscriptionJob
 
 
+def _ignore_sigint():
+    """Ignore SIGINT in child processes; the main process handles shutdown."""
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+
 def healthcheck() -> None:
+    _ignore_sigint()
     while True:
         # Gather load average, memory usage and GPU usage
         load_avg = psutil.cpu_percent()
@@ -88,48 +95,88 @@ def healthcheck() -> None:
         sleep(10)
 
 
-def mainloop(worker_id: int) -> None:
-    """
-    Main function to fetch jobs and process them.
-    """
+def fail_job(uuid: str) -> None:
+    """Mark a job as failed via the API."""
+    api_url = f"{settings.API_BACKEND_URL}/api/{settings.API_VERSION}/job"
+    try:
+        response = requests.put(
+            f"{api_url}/{uuid}",
+            json={
+                "status": "failed",
+                "error": "Worker shutdown",
+                "transcribed_seconds": None,
+            },
+            cert=(settings.SSL_CERTFILE, settings.SSL_KEYFILE),
+        )
+        response.raise_for_status()
+        logger.info(f"Job {uuid}: marked as failed (shutdown)")
+    except requests.RequestException as e:
+        logger.error(f"Job {uuid}: failed to mark as failed: {e}")
 
-    logger.info(f"[{worker_id}] Starting worker process...")
 
+def run_job(worker_id: int, active_jobs: dict) -> None:
+    """
+    Fetch and process a single transcription job.
+    """
+    _ignore_sigint()
     api_url = f"{settings.API_BACKEND_URL}/api/{settings.API_VERSION}/job"
 
-    while True:
-        sleep_time = randint(10, 60)
-
-        sleep(sleep_time)
-
-        try:
-            with TranscriptionJob(
-                logger,
-                api_url,
-                hf_token=settings.HF_TOKEN,
-            ) as job:
-                job.start()
-        except Exception:
-            logger.exception(f"[{worker_id}] Worker crashed, restarting loop")
+    try:
+        with TranscriptionJob(
+            logger,
+            api_url,
+            hf_token=settings.HF_TOKEN,
+            active_jobs=active_jobs,
+        ) as job:
+            job.start()
+    except Exception:
+        logger.exception(f"[{worker_id}] Worker crashed")
 
 
 def main() -> None:
     logger.info("Starting transcription service...")
 
-    if no_healthcheck:
-        processes = []
-    else:
-        processes = [mp.Process(target=healthcheck)]
+    manager = mp.Manager()
+    active_jobs = manager.dict()
 
-    processes += [
-        mp.Process(target=mainloop, args=(i,)) for i in range(settings.WORKERS)
-    ]
+    hc = None
+    if not no_healthcheck:
+        hc = mp.Process(target=healthcheck)
+        hc.start()
 
-    for p in processes:
-        p.start()
+    worker_id = 0
+    workers: list[mp.Process] = []
 
-    for p in processes:
-        p.join()
+    def shutdown(signum, frame):
+        logger.info(f"Received signal {signum}, shutting down...")
+        for uuid in list(active_jobs.values()):
+            fail_job(uuid)
+        for w in workers:
+            if w.is_alive():
+                w.terminate()
+                w.join(timeout=5)
+        if hc and hc.is_alive():
+            hc.terminate()
+            hc.join(timeout=5)
+        manager.shutdown()
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, shutdown)
+    signal.signal(signal.SIGINT, shutdown)
+
+    while True:
+        # Reap finished workers
+        workers = [w for w in workers if w.is_alive()]
+
+        if len(workers) < settings.WORKERS:
+            p = mp.Process(target=run_job, args=(worker_id, active_jobs))
+            p.start()
+            workers.append(p)
+            worker_id += 1
+        else:
+            logger.info(f"All {settings.WORKERS} slots busy, waiting...")
+
+        sleep(10)
 
 
 def daemon_kill() -> None:

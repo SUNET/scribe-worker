@@ -18,6 +18,7 @@
 import gc
 import io
 import logging
+import os
 import requests
 import subprocess
 import tempfile
@@ -53,10 +54,12 @@ class TranscriptionJob:
         logger: logging.Logger,
         api_url: str,
         hf_token: Optional[str] = None,
+        active_jobs: Optional[dict] = None,
     ):
         self.logger = logger
         self.api_url = api_url
         self.hf_token = hf_token
+        self._active_jobs = active_jobs
 
     def __enter__(self) -> "TranscriptionJob":
         """
@@ -77,6 +80,8 @@ class TranscriptionJob:
         """
         Cleanup resources when the job is done.
         """
+        if self._active_jobs is not None:
+            self._active_jobs.pop(os.getpid(), None)
         self.__cleanup()
 
     def start(self) -> bool:
@@ -95,6 +100,9 @@ class TranscriptionJob:
         self.model = self.__get_model()
         self.speakers = job.get("speakers", 0)
         self.output_format = job.get("output_format", "txt")
+
+        if self._active_jobs is not None and self.uuid:
+            self._active_jobs[os.getpid()] = self.uuid
 
         if not self.speakers:
             self.speakers = 0
