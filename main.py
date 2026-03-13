@@ -5,6 +5,7 @@ import psutil
 import requests
 import signal
 import sys
+import threading
 
 import whisper_timestamped as whisper
 
@@ -126,27 +127,18 @@ def main() -> None:
         hc = mp.Process(target=healthcheck)
         hc.start()
 
+    shutdown_event = threading.Event()
     worker_id = 0
     workers: list[mp.Process] = []
 
     def shutdown(signum, frame):
         logger.info(f"Received signal {signum}, shutting down...")
-        for uuid in list(active_jobs.values()):
-            fail_job(uuid)
-        for w in workers:
-            if w.is_alive():
-                w.terminate()
-                w.join(timeout=5)
-        if hc and hc.is_alive():
-            hc.terminate()
-            hc.join(timeout=5)
-        manager.shutdown()
-        sys.exit(0)
+        shutdown_event.set()
 
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
 
-    while True:
+    while not shutdown_event.is_set():
         # Reap finished workers
         workers = [w for w in workers if w.is_alive()]
 
@@ -158,7 +150,26 @@ def main() -> None:
         else:
             logger.info(f"All {settings.WORKERS} slots busy, waiting...")
 
-        sleep(10)
+        shutdown_event.wait(timeout=10)
+
+    # Mark active jobs as failed
+    for uuid in list(active_jobs.values()):
+        fail_job(uuid)
+
+    # Wait for workers to finish, then terminate stragglers
+    for w in workers:
+        w.join(timeout=10)
+        if w.is_alive():
+            logger.warning(f"Worker {w.pid} still alive, terminating...")
+            w.terminate()
+            w.join(timeout=5)
+
+    if hc and hc.is_alive():
+        hc.terminate()
+        hc.join(timeout=5)
+
+    manager.shutdown()
+    logger.info("Shutdown complete.")
 
 
 def daemon_kill() -> None:

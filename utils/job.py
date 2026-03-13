@@ -3,16 +3,15 @@ import io
 import logging
 import os
 import requests
-import subprocess
 import tempfile
 import time
 import torch
-import wave
 
 from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 from typing import Optional
 from utils import settings
+from utils.media import downscale_video, downsample_audio, has_video_stream, transcode_to_wav
 from utils.whisper import WhisperAudioTranscriber
 
 settings = settings.get_settings()
@@ -224,147 +223,31 @@ class TranscriptionJob:
 
         return transcribed_seconds
 
-    def __run_cmd_pipe(self, command: list, input_data: bytes = None) -> bytes:
-        """
-        Run a command, capturing stdout.
-        Optionally pipes input_data to stdin.
-        """
-        process = subprocess.Popen(
-            command,
-            stdin=subprocess.PIPE if input_data else None,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        stdout, stderr = process.communicate(input=input_data)
-
-        if process.returncode != 0:
-            raise subprocess.CalledProcessError(
-                returncode=process.returncode,
-                cmd=" ".join(command),
-                output=None,
-                stderr=stderr.decode(),
-            )
-
-        return stdout
-
     def __downscale_video(self) -> bool:
-        """
-        Downscale videos to a smaller size.
-        Output is captured in memory (self.mp4_data).
-        """
-        input_path = self.__ffmpeg_input_path()
-        command = [
-            settings.FFMPEG_PATH,
-            "-nostdin",
-            "-threads", "0",
-            "-i",
-            input_path,
-            "-vf",
-            "scale=-2:240:flags=bilinear",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "ultrafast",
-            "-crf",
-            "28",
-            "-profile:v",
-            "baseline",
-            "-pix_fmt",
-            "yuv420p",
-            "-g", "24",
-            "-keyint_min", "24",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "48k",
-            "-ar",
-            "44100",
-            "-ac",
-            "1",
-            "-movflags",
-            "frag_keyframe+empty_moov+default_base_moof",
-            "-f",
-            "mp4",
-            "pipe:1",
-        ]
         try:
-            self.mp4_data = self.__run_cmd_pipe(command)
+            self.mp4_data = downscale_video(self.__temp_file.name)
         except Exception as e:
             self.logger.error(f"Error during downscaling: {e}")
             return False
         return True
 
+    def __has_video_stream(self) -> bool:
+        return has_video_stream(self.__temp_file.name)
+
     def __downsample_audio(self) -> bool:
-        """
-        Downsample audio to a lightweight AAC stream in a fragmented MP4 container.
-        This ensures the same streaming support as video previews.
-        Output is captured in memory (self.mp4_data).
-        """
-        input_path = self.__ffmpeg_input_path()
-        command = [
-            settings.FFMPEG_PATH,
-            "-nostdin",
-            "-threads", "0",
-            "-i",
-            input_path,
-            "-vn",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "64k",
-            "-ar",
-            "44100",
-            "-ac",
-            "1",
-            "-movflags",
-            "frag_keyframe+empty_moov+default_base_moof",
-            "-f",
-            "mp4",
-            "pipe:1",
-        ]
         try:
-            self.mp4_data = self.__run_cmd_pipe(command)
+            self.mp4_data = downsample_audio(self.__temp_file.name)
         except Exception as e:
             self.logger.error(f"Error during audio downsampling: {e}")
+            self.mp4_data = None
             return False
+
+        if not self.mp4_data:
+            self.logger.error("Audio downsampling produced no output")
+            self.mp4_data = None
+            return False
+
         return True
-
-    def __raw_pcm_to_wav(self, pcm_data: bytes, sample_rate: int = 16000, channels: int = 1, sample_width: int = 2) -> bytes:
-        """
-        Wrap raw PCM (s16le) data in a WAV header.
-        """
-        buf = io.BytesIO()
-        with wave.open(buf, "wb") as wf:
-            wf.setnchannels(channels)
-            wf.setsampwidth(sample_width)
-            wf.setframerate(sample_rate)
-            wf.writeframes(pcm_data)
-        return buf.getvalue()
-
-    def __has_video_stream(self) -> bool:
-        """
-        Probe the temp file with ffprobe to check for a video stream.
-        """
-        input_path = self.__ffmpeg_input_path()
-        command = [
-            "ffprobe",
-            "-v", "quiet",
-            "-select_streams", "v",
-            "-show_entries", "stream=codec_type",
-            "-of", "csv=p=0",
-            input_path,
-        ]
-        try:
-            output = self.__run_cmd_pipe(command)
-            return b"video" in output
-        except Exception:
-            return False
-
-    def __ffmpeg_input_path(self) -> str:
-        """
-        Return the path to the temp file for ffmpeg input.
-        """
-        return self.__temp_file.name
 
     def __close_temp_file(self):
         if self.__temp_file:
@@ -372,30 +255,8 @@ class TranscriptionJob:
             self.__temp_file = None
 
     def __transcode_file(self) -> bool:
-        """
-        Transcode the audio file using ffmpeg.
-        The transcoded format should be 16kHz mono signed 16-bit PCM.
-        Raw PCM is piped to stdout, then wrapped in a WAV header in memory.
-        """
-        input_path = self.__ffmpeg_input_path()
-        command = [
-            settings.FFMPEG_PATH,
-            "-nostdin",
-            "-threads", "0",
-            "-i",
-            input_path,
-            "-ar",
-            "16000",
-            "-ac",
-            "1",
-            "-f",
-            "s16le",
-            "pipe:1",
-        ]
-
         try:
-            pcm_data = self.__run_cmd_pipe(command)
-            self.wav_data = self.__raw_pcm_to_wav(pcm_data)
+            self.wav_data = transcode_to_wav(self.__temp_file.name)
         except Exception as e:
             self.logger.error(f"Error during transcoding: {e}")
             return False
@@ -477,7 +338,9 @@ class TranscriptionJob:
 
         response = requests.put(
             f"{self.api_url}/{self.user_id}/{self.uuid}/file",
-            files={"file": (f"{self.uuid}.mp4", io.BytesIO(self.mp4_data), "video/mp4")},
+            files={
+                "file": (f"{self.uuid}.mp4", io.BytesIO(self.mp4_data), "video/mp4")
+            },
             cert=(settings.SSL_CERTFILE, settings.SSL_KEYFILE),
         )
         response.raise_for_status()
@@ -513,7 +376,9 @@ class TranscriptionJob:
                 self.__upload_result("srt", {"result": self.srt_data, "format": "srt"})
 
             if self.json_data:
-                self.__upload_result("json", {"result": self.json_data, "format": "json"})
+                self.__upload_result(
+                    "json", {"result": self.json_data, "format": "json"}
+                )
 
             if media_future:
                 media_future.result()
