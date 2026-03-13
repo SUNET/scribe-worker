@@ -511,27 +511,30 @@ class WhisperAudioTranscriber:
                 "Transcription result is not available or does not contain chunks."
             )
 
-        # Build list of (start_ms, end_ms, caption) entries
+        # Build list of (start_ms, end_ms, start_s, end_s, caption) entries
         entries = []
         for chunk in self.__result["chunks"]:
             text = chunk["text"].strip()
             if not text:
                 continue
             start, end = chunk["timestamp_ms"]
+            start_s, end_s = chunk["timestamp"]
             caption = self.__caption_split(text)
-            entries.append((start, end, caption))
+            entries.append((start, end, start_s, end_s, caption))
 
         # Merge consecutive single-line captions into one two-line subtitle
+        # only if the gap between them is less than 1.8 seconds
         merged = []
         i = 0
         while i < len(entries):
-            start, end, caption = entries[i]
+            start, end, start_s, end_s, caption = entries[i]
             if (
                 "\n" not in caption
                 and i + 1 < len(entries)
-                and "\n" not in entries[i + 1][2]
+                and "\n" not in entries[i + 1][4]
+                and entries[i + 1][2] - end_s < 1.8
             ):
-                next_start, next_end, next_caption = entries[i + 1]
+                next_start, next_end, _, _, next_caption = entries[i + 1]
                 merged.append((start, next_end, f"{caption}\n{next_caption}"))
                 i += 2
             else:
