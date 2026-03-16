@@ -36,12 +36,13 @@ class TranscriptionJob:
         logger: logging.Logger,
         api_url: str,
         hf_token: Optional[str] = None,
-        active_jobs: Optional[dict] = None,
+        jobs_dir: Optional[str] = None,
     ):
         self.logger = logger
         self.api_url = api_url
         self.hf_token = hf_token
-        self._active_jobs = active_jobs
+        self._jobs_dir = jobs_dir
+        self._job_file = None
 
     def __enter__(self) -> "TranscriptionJob":
         """
@@ -62,8 +63,12 @@ class TranscriptionJob:
         """
         Cleanup resources when the job is done.
         """
-        if self._active_jobs is not None:
-            self._active_jobs.pop(os.getpid(), None)
+        if self._job_file:
+            try:
+                os.remove(self._job_file)
+            except OSError:
+                pass
+            self._job_file = None
         self.__cleanup()
 
     def start(self) -> bool:
@@ -83,8 +88,10 @@ class TranscriptionJob:
         self.speakers = job.get("speakers", 0)
         self.output_format = job.get("output_format", "txt")
 
-        if self._active_jobs is not None and self.uuid:
-            self._active_jobs[os.getpid()] = self.uuid
+        if self._jobs_dir and self.uuid:
+            self._job_file = os.path.join(self._jobs_dir, str(os.getpid()))
+            with open(self._job_file, "w") as f:
+                f.write(self.uuid)
 
         if not self.speakers:
             self.speakers = 0

@@ -5,6 +5,7 @@ import psutil
 import requests
 import signal
 import sys
+import tempfile
 import threading
 
 import whisper_timestamped as whisper
@@ -97,7 +98,7 @@ def fail_job(uuid: str) -> None:
         logger.error(f"Job {uuid}: failed to mark as failed: {e}")
 
 
-def run_job(worker_id: int, active_jobs: dict) -> None:
+def run_job(worker_id: int, jobs_dir: str) -> None:
     """
     Fetch and process a single transcription job.
     """
@@ -109,7 +110,7 @@ def run_job(worker_id: int, active_jobs: dict) -> None:
             logger,
             api_url,
             hf_token=settings.HF_TOKEN,
-            active_jobs=active_jobs,
+            jobs_dir=jobs_dir,
         ) as job:
             job.start()
     except Exception:
@@ -119,8 +120,8 @@ def run_job(worker_id: int, active_jobs: dict) -> None:
 def main() -> None:
     logger.info("Starting transcription service...")
 
-    manager = mp.Manager()
-    active_jobs = manager.dict()
+    jobs_dir = os.path.join(tempfile.gettempdir(), "transcribe_worker_jobs")
+    os.makedirs(jobs_dir, exist_ok=True)
 
     hc = None
     if not no_healthcheck:
@@ -143,7 +144,7 @@ def main() -> None:
         workers = [w for w in workers if w.is_alive()]
 
         if len(workers) < settings.WORKERS:
-            p = mp.Process(target=run_job, args=(worker_id, active_jobs))
+            p = mp.Process(target=run_job, args=(worker_id, jobs_dir))
             p.start()
             workers.append(p)
             worker_id += 1
@@ -153,8 +154,16 @@ def main() -> None:
         shutdown_event.wait(timeout=10)
 
     # Mark active jobs as failed
-    for uuid in list(active_jobs.values()):
-        fail_job(uuid)
+    for filename in os.listdir(jobs_dir):
+        filepath = os.path.join(jobs_dir, filename)
+        try:
+            with open(filepath, "r") as f:
+                uuid = f.read().strip()
+            if uuid:
+                fail_job(uuid)
+            os.remove(filepath)
+        except Exception:
+            pass
 
     # Wait for workers to finish, then terminate stragglers
     for w in workers:
@@ -168,7 +177,6 @@ def main() -> None:
         hc.terminate()
         hc.join(timeout=5)
 
-    manager.shutdown()
     logger.info("Shutdown complete.")
 
 
