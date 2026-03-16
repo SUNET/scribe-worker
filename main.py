@@ -6,7 +6,6 @@ import requests
 import signal
 import sys
 import tempfile
-import threading
 
 import whisper_timestamped as whisper
 
@@ -98,23 +97,26 @@ def fail_job(uuid: str) -> None:
         logger.error(f"Job {uuid}: failed to mark as failed: {e}")
 
 
-def run_job(worker_id: int, jobs_dir: str) -> None:
+def run_job(worker_id: int, jobs_dir: str, stop_event: mp.Event) -> None:
     """
-    Fetch and process a single transcription job.
+    Fetch and process transcription jobs until stopped.
     """
     _ignore_sigint()
     api_url = f"{settings.API_BACKEND_URL}/api/{settings.API_VERSION}/job"
 
-    try:
-        with TranscriptionJob(
-            logger,
-            api_url,
-            hf_token=settings.HF_TOKEN,
-            jobs_dir=jobs_dir,
-        ) as job:
-            job.start()
-    except Exception:
-        logger.exception(f"[{worker_id}] Worker crashed")
+    while not stop_event.is_set():
+        try:
+            with TranscriptionJob(
+                logger,
+                api_url,
+                hf_token=settings.HF_TOKEN,
+                jobs_dir=jobs_dir,
+            ) as job:
+                job.start()
+        except Exception:
+            logger.exception(f"[{worker_id}] Worker crashed")
+
+        stop_event.wait(timeout=10)
 
 
 def main() -> None:
@@ -128,30 +130,23 @@ def main() -> None:
         hc = mp.Process(target=healthcheck)
         hc.start()
 
-    shutdown_event = threading.Event()
-    worker_id = 0
+    stop_event = mp.Event()
     workers: list[mp.Process] = []
+
+    for i in range(settings.WORKERS):
+        p = mp.Process(target=run_job, args=(i, jobs_dir, stop_event))
+        p.start()
+        workers.append(p)
 
     def shutdown(signum, frame):
         logger.info(f"Received signal {signum}, shutting down...")
-        shutdown_event.set()
+        stop_event.set()
 
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
 
-    while not shutdown_event.is_set():
-        # Reap finished workers
-        workers = [w for w in workers if w.is_alive()]
-
-        if len(workers) < settings.WORKERS:
-            p = mp.Process(target=run_job, args=(worker_id, jobs_dir))
-            p.start()
-            workers.append(p)
-            worker_id += 1
-        else:
-            logger.info(f"All {settings.WORKERS} slots busy, waiting...")
-
-        shutdown_event.wait(timeout=10)
+    # Block until shutdown signal
+    signal.pause()
 
     # Mark active jobs as failed
     for filename in os.listdir(jobs_dir):
@@ -167,7 +162,7 @@ def main() -> None:
 
     # Wait for workers to finish, then terminate stragglers
     for w in workers:
-        w.join(timeout=10)
+        w.join(timeout=15)
         if w.is_alive():
             logger.warning(f"Worker {w.pid} still alive, terminating...")
             w.terminate()
