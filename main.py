@@ -116,7 +116,7 @@ def run_job(worker_id: int, jobs_dir: str, stop_event: mp.Event) -> None:
         except Exception:
             logger.exception(f"[{worker_id}] Worker crashed")
 
-        stop_event.wait(timeout=10)
+        stop_event.wait(timeout=randint(10, 60))
 
 
 def main() -> None:
