@@ -586,17 +586,23 @@ class WhisperAudioTranscriber:
             end_sample = int(seg_end * sample_rate)
             segment_audio = audio[start_sample:end_sample]
 
-            input_features = self.__processor(
+            inputs = self.__processor(
                 segment_audio,
                 sampling_rate=sample_rate,
                 return_tensors="pt",
-            ).input_features.to(self.__model.device, dtype=self.__model.dtype)
+                return_attention_mask=True,
+            )
+            input_features = inputs.input_features.to(
+                self.__model.device, dtype=self.__model.dtype
+            )
+            attention_mask = inputs.attention_mask.to(self.__model.device)
 
             # Try DTW word-level timestamps
             if use_dtw:
                 try:
                     output = self.__model.generate(
                         input_features,
+                        attention_mask=attention_mask,
                         return_token_timestamps=True,
                         **generate_kwargs,
                     )
@@ -619,7 +625,9 @@ class WhisperAudioTranscriber:
 
             # Fallback: segment-level timestamps from timestamp tokens
             try:
-                output = self.__model.generate(input_features, **generate_kwargs)
+                output = self.__model.generate(
+                    input_features, attention_mask=attention_mask, **generate_kwargs
+                )
             except (RuntimeError, IndexError):
                 self.__logger.debug(
                     f"Skipping VAD segment {seg_start:.2f}-{seg_end:.2f}s (generate failed)"
