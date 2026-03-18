@@ -10,7 +10,7 @@ import wave
 
 from huggingface_hub import snapshot_download
 from pyannote.audio import Pipeline
-from transformers import WhisperForConditionalGeneration, WhisperProcessor, pipeline as hf_pipeline
+from transformers import WhisperForConditionalGeneration, WhisperProcessor
 from typing import Optional
 from utils.settings import get_settings
 
@@ -113,11 +113,13 @@ def _run_vad(audio: np.ndarray, sample_rate: int = 16000) -> list[tuple[float, f
             for ts in speech_timestamps
         ]
 
-        # Merge segments with gaps < 0.3s
+        # Merge segments with gaps < 0.3s, but cap at 28s to stay within
+        # Whisper's 30s window
+        MAX_SEGMENT_DURATION = 28.0
         merged = [segments[0]]
         for start, end in segments[1:]:
             prev_start, prev_end = merged[-1]
-            if start - prev_end < 0.3:
+            if start - prev_end < 0.3 and (end - prev_start) <= MAX_SEGMENT_DURATION:
                 merged[-1] = (prev_start, end)
             else:
                 merged.append((start, end))
@@ -136,7 +138,7 @@ def _run_vad(audio: np.ndarray, sample_rate: int = 16000) -> list[tuple[float, f
 def load_whisper_model(model_name: str, logger: logging.Logger) -> tuple:
     """
     Load and cache a Whisper model using HF Transformers directly.
-    Returns (model, processor, pipe) tuple.
+    Returns (model, processor) tuple.
     """
     if model_name in _model_cache:
         return _model_cache[model_name]
@@ -178,21 +180,54 @@ def load_whisper_model(model_name: str, logger: logging.Logger) -> tuple:
         ).to(device)
         processor = WhisperProcessor.from_pretrained(load_name)
 
-    pipe = hf_pipeline(
-        "automatic-speech-recognition",
-        model=model,
-        tokenizer=processor.tokenizer,
-        feature_extractor=processor.feature_extractor,
-        torch_dtype=torch_dtype,
-        device=device,
-        chunk_length_s=30,
-        stride_length_s=(5, 5),
-    )
-
     logger.info(f"Loaded model '{model_name}' on {device}")
-    result = (model, processor, pipe)
+    result = (model, processor)
     _model_cache[model_name] = result
     return result
+
+
+def _tokens_to_words(processor, token_ids, token_timestamps) -> list[dict]:
+    """
+    Convert token-level IDs and timestamps from model.generate() into
+    word-level entries: [{"text": ..., "start": ..., "end": ...}, ...]
+    """
+    words = []
+    current_tokens = []  # list of (decoded_text, timestamp)
+
+    special_ids = set(processor.tokenizer.all_special_ids)
+
+    for tid, ts in zip(token_ids, token_timestamps):
+        tid = int(tid)
+        ts = float(ts)
+
+        if tid in special_ids:
+            continue
+
+        decoded = processor.tokenizer.decode([tid])
+
+        # Space prefix marks a word boundary in GPT-2/Whisper tokenizers
+        if decoded.startswith(" ") and current_tokens:
+            word_text = "".join(t for t, _ in current_tokens).strip()
+            if word_text:
+                words.append(
+                    {"text": word_text, "start": current_tokens[0][1], "end": ts}
+                )
+            current_tokens = [(decoded, ts)]
+        else:
+            current_tokens.append((decoded, ts))
+
+    if current_tokens:
+        word_text = "".join(t for t, _ in current_tokens).strip()
+        if word_text:
+            words.append(
+                {
+                    "text": word_text,
+                    "start": current_tokens[0][1],
+                    "end": current_tokens[-1][1],
+                }
+            )
+
+    return words
 
 
 def _group_words_into_segments(words: list[dict]) -> list[dict]:
@@ -301,7 +336,7 @@ class WhisperAudioTranscriber:
         self.__logger = logger
         self.__speakers = speakers
         self.__diarization_pipeline = diarization_object
-        self.__model, self.__processor, self.__pipe = load_whisper_model(model_name, logger)
+        self.__model, self.__processor = load_whisper_model(model_name, logger)
 
     def __decode_wav_bytes(self, wav_bytes: bytes) -> tuple:
         """
@@ -493,27 +528,40 @@ class WhisperAudioTranscriber:
         t0 = time.monotonic()
         all_words = []
 
-        generate_kwargs = {"language": self.__language} if self.__language else {}
+        generate_kwargs = {
+            "return_timestamps": True,
+            "return_token_timestamps": True,
+            "task": "transcribe",
+        }
+        if self.__language:
+            generate_kwargs["language"] = self.__language
 
         for seg_start, seg_end in vad_segments:
+            # Skip very short segments that can crash DTW
+            if seg_end - seg_start < 0.5:
+                continue
+
             start_sample = int(seg_start * sample_rate)
             end_sample = int(seg_end * sample_rate)
             segment_audio = audio[start_sample:end_sample]
 
-            result = self.__pipe(
-                segment_audio.copy(),
-                return_timestamps="word",
-                generate_kwargs=generate_kwargs,
+            input_features = self.__processor(
+                segment_audio,
+                sampling_rate=sample_rate,
+                return_tensors="pt",
+            ).input_features.to(self.__model.device, dtype=self.__model.dtype)
+
+            output = self.__model.generate(input_features, **generate_kwargs)
+
+            words = _tokens_to_words(
+                self.__processor, output.sequences[0], output.token_timestamps[0]
             )
 
             # Offset-correct word timestamps by VAD region start
-            for chunk in result.get("chunks", []):
-                ts = chunk.get("timestamp", (0.0, 0.0))
-                word_start = (ts[0] or 0.0) + seg_start
-                word_end = (ts[1] or word_start) + seg_start
-                text = chunk.get("text", "").strip()
-                if text:
-                    all_words.append({"text": text, "start": word_start, "end": word_end})
+            for w in words:
+                w["start"] += seg_start
+                w["end"] += seg_start
+                all_words.append(w)
 
         elapsed = time.monotonic() - t0
         rtf = elapsed / audio_duration if audio_duration > 0 else 0
