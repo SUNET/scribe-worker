@@ -7,7 +7,7 @@ import signal
 import sys
 import tempfile
 
-import whisper_timestamped as whisper
+import torch
 
 from daemonize import Daemonize
 from huggingface_hub import snapshot_download
@@ -230,22 +230,25 @@ def download_models() -> None:
             + "..."
         )
 
-        if "/" in model_name:
-            kwargs = {"repo_id": model_name}
-            if revision:
-                kwargs["revision"] = revision
-            kwargs["allow_patterns"] = [
-                "*.json",
-                "*.txt",
-                "*.model",
-                "*.safetensors",
-                "*.bin",
-            ]
-            snapshot_download(**kwargs)
-        else:
-            whisper.load_model(model_name, device="cpu")
+        repo_id = model_name if "/" in model_name else f"openai/whisper-{model_name}"
+        kwargs = {"repo_id": repo_id}
+        if revision:
+            kwargs["revision"] = revision
+        kwargs["allow_patterns"] = [
+            "*.json",
+            "*.txt",
+            "*.model",
+            "*.safetensors",
+            "*.bin",
+        ]
+        snapshot_download(**kwargs)
 
         print("  Done.")
+
+    # Pre-download Silero VAD model
+    print("Downloading Silero VAD model...")
+    torch.hub.load("snakers4/silero-vad", "silero_vad", trust_repo=True)
+    print("  Done.")
 
     print("\nAll models downloaded.")
 

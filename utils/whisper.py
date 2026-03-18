@@ -7,10 +7,10 @@ import time
 import torch
 import warnings
 import wave
-import whisper_timestamped as whisper
 
 from huggingface_hub import snapshot_download
 from pyannote.audio import Pipeline
+from transformers import WhisperForConditionalGeneration, WhisperProcessor, pipeline as hf_pipeline
 from typing import Optional
 from utils.settings import get_settings
 
@@ -38,6 +38,7 @@ def get_torch_device() -> tuple:
 
 _model_cache: dict[str, object] = {}
 _diarization_cache: Optional[Pipeline] = None
+_vad_model = None
 
 
 def diarization_init(hf_token: str) -> Optional[Pipeline]:
@@ -59,17 +60,88 @@ def diarization_init(hf_token: str) -> Optional[Pipeline]:
     return _diarization_cache
 
 
-def load_whisper_model(model_name: str, logger: logging.Logger) -> object:
-    """
-    Load and cache a whisper model. Returns cached model if already loaded.
+def _load_silero_vad():
+    """Load and cache the Silero VAD model."""
+    global _vad_model
+    if _vad_model is not None:
+        return _vad_model
 
-    HuggingFace models (containing '/') use the transformers backend so the
-    model's own tokenizer is used instead of OpenAI's default tiktoken one.
+    model, utils = torch.hub.load(
+        repo_or_dir="snakers4/silero-vad",
+        model="silero_vad",
+        trust_repo=True,
+    )
+    _vad_model = (model, utils)
+    return _vad_model
+
+
+def _run_vad(audio: np.ndarray, sample_rate: int = 16000) -> list[tuple[float, float]]:
+    """
+    Run Silero VAD on audio and return speech segment boundaries as
+    list of (start_seconds, end_seconds).
+
+    Merges segments with gaps < 0.3s and pads each by 0.1s.
+    Falls back to treating entire audio as one segment on failure.
+    """
+    audio_duration = len(audio) / sample_rate
+
+    # Skip VAD for very short audio
+    if audio_duration < 1.0:
+        return [(0.0, audio_duration)]
+
+    try:
+        model, utils = _load_silero_vad()
+        get_speech_timestamps = utils[0]
+
+        audio_tensor = torch.from_numpy(audio).float()
+
+        speech_timestamps = get_speech_timestamps(
+            audio_tensor,
+            model,
+            sampling_rate=sample_rate,
+            threshold=0.5,
+            min_speech_duration_ms=250,
+            min_silence_duration_ms=100,
+        )
+
+        if not speech_timestamps:
+            return []
+
+        # Convert sample indices to seconds
+        segments = [
+            (ts["start"] / sample_rate, ts["end"] / sample_rate)
+            for ts in speech_timestamps
+        ]
+
+        # Merge segments with gaps < 0.3s
+        merged = [segments[0]]
+        for start, end in segments[1:]:
+            prev_start, prev_end = merged[-1]
+            if start - prev_end < 0.3:
+                merged[-1] = (prev_start, end)
+            else:
+                merged.append((start, end))
+
+        # Pad each segment by 0.1s on each side
+        padded = []
+        for start, end in merged:
+            padded.append((max(0.0, start - 0.1), min(audio_duration, end + 0.1)))
+
+        return padded
+
+    except Exception:
+        return [(0.0, audio_duration)]
+
+
+def load_whisper_model(model_name: str, logger: logging.Logger) -> tuple:
+    """
+    Load and cache a Whisper model using HF Transformers directly.
+    Returns (model, processor, pipe) tuple.
     """
     if model_name in _model_cache:
         return _model_cache[model_name]
 
-    device, _ = get_torch_device()
+    device, torch_dtype = get_torch_device()
 
     # Parse optional revision (e.g. "kblab/kb-whisper-large@strict")
     revision = None
@@ -77,14 +149,14 @@ def load_whisper_model(model_name: str, logger: logging.Logger) -> object:
     if "@" in load_name:
         load_name, revision = load_name.rsplit("@", 1)
 
-    # HuggingFace models use the transformers backend so the model's own
-    # tokenizer is loaded automatically via WhisperProcessor.from_pretrained.
     is_hf_model = "/" in load_name
-    backend = "transformers" if is_hf_model else "openai-whisper"
+
+    # For non-HF models (e.g. "base", "large-v3"), map to openai repo
+    if not is_hf_model:
+        load_name = f"openai/whisper-{load_name}"
 
     # If a specific revision is needed, download via huggingface_hub first
-    # and pass the local path to whisper-timestamped (bypasses its revision=None)
-    if revision and is_hf_model:
+    if revision:
         load_name = snapshot_download(
             load_name,
             revision=revision,
@@ -93,15 +165,117 @@ def load_whisper_model(model_name: str, logger: logging.Logger) -> object:
         logger.info(f"Using '{model_name}' revision '{revision}' from {load_name}")
 
     try:
-        model = whisper.load_model(load_name, device=device, backend=backend)
-    except NotImplementedError:
+        model = WhisperForConditionalGeneration.from_pretrained(
+            load_name, torch_dtype=torch_dtype
+        ).to(device)
+        processor = WhisperProcessor.from_pretrained(load_name)
+    except (NotImplementedError, RuntimeError):
         logger.warning(f"Failed to load model on {device}, falling back to CPU")
         device = "cpu"
-        model = whisper.load_model(load_name, device=device, backend=backend)
+        torch_dtype = torch.float32
+        model = WhisperForConditionalGeneration.from_pretrained(
+            load_name, torch_dtype=torch_dtype
+        ).to(device)
+        processor = WhisperProcessor.from_pretrained(load_name)
 
-    logger.info(f"Loaded model '{model_name}' on {device} (backend={backend})")
-    _model_cache[model_name] = model
-    return model
+    pipe = hf_pipeline(
+        "automatic-speech-recognition",
+        model=model,
+        tokenizer=processor.tokenizer,
+        feature_extractor=processor.feature_extractor,
+        torch_dtype=torch_dtype,
+        device=device,
+        chunk_length_s=30,
+        stride_length_s=(5, 5),
+    )
+
+    logger.info(f"Loaded model '{model_name}' on {device}")
+    result = (model, processor, pipe)
+    _model_cache[model_name] = result
+    return result
+
+
+def _group_words_into_segments(words: list[dict]) -> list[dict]:
+    """
+    Group word-level timestamps into subtitle-sized segments.
+
+    Breaks on:
+    - Pause > 0.8s between words
+    - Sentence-ending punctuation (.?!) when accumulated text > 40 chars
+    - Hard break at ~90 chars
+    """
+    if not words:
+        return []
+
+    segments = []
+    current_words = []
+    current_text = ""
+    seg_start = None
+
+    for word in words:
+        w_text = word.get("text", "").strip()
+        w_start = word.get("start", 0.0)
+        w_end = word.get("end", 0.0)
+
+        if not w_text:
+            continue
+
+        # Check if we should break before adding this word
+        if current_words:
+            prev_end = current_words[-1]["end"]
+            gap = w_start - prev_end
+
+            should_break = False
+
+            # Break on pause > 0.8s
+            if gap > 0.8:
+                should_break = True
+
+            # Break on sentence-ending punctuation when text is long enough
+            if (
+                len(current_text) > 40
+                and current_text
+                and current_text[-1] in ".?!"
+            ):
+                should_break = True
+
+            # Hard break at ~90 chars
+            if len(current_text) + 1 + len(w_text) > 90:
+                should_break = True
+
+            if should_break:
+                segments.append(
+                    {
+                        "start": seg_start,
+                        "end": current_words[-1]["end"],
+                        "text": current_text.strip(),
+                        "words": current_words,
+                    }
+                )
+                current_words = []
+                current_text = ""
+                seg_start = None
+
+        if seg_start is None:
+            seg_start = w_start
+
+        current_words.append({"text": w_text, "start": w_start, "end": w_end})
+        if current_text:
+            current_text += " "
+        current_text += w_text
+
+    # Flush remaining words
+    if current_words:
+        segments.append(
+            {
+                "start": seg_start,
+                "end": current_words[-1]["end"],
+                "text": current_text.strip(),
+                "words": current_words,
+            }
+        )
+
+    return segments
 
 
 class WhisperAudioTranscriber:
@@ -127,7 +301,7 @@ class WhisperAudioTranscriber:
         self.__logger = logger
         self.__speakers = speakers
         self.__diarization_pipeline = diarization_object
-        self.__model = load_whisper_model(model_name, logger)
+        self.__model, self.__processor, self.__pipe = load_whisper_model(model_name, logger)
 
     def __decode_wav_bytes(self, wav_bytes: bytes) -> tuple:
         """
@@ -166,7 +340,7 @@ class WhisperAudioTranscriber:
 
     def __process_transcription(self, segments: list) -> dict:
         """
-        Normalize and process transcription segments from whisper-timestamped.
+        Normalize and process transcription segments.
         """
         full_transcription = ""
         processed_segments = []
@@ -192,15 +366,6 @@ class WhisperAudioTranscriber:
             duration = end_time - start_time
 
             avg_score = None
-            words = segment.get("words", [])
-            if words:
-                confidences = [
-                    float(w.get("confidence", 0))
-                    for w in words
-                    if w.get("text", "").strip()
-                ]
-                if confidences:
-                    avg_score = round(float(sum(confidences) / len(confidences)), 4)
 
             if len(text) > 90:
                 mid_index = len(text) // 2
@@ -296,53 +461,71 @@ class WhisperAudioTranscriber:
     def __transcribe_audio(self, filepath: Optional[str] = None) -> dict:
         t0 = time.monotonic()
         if self.__audio_data:
-            audio, _ = self.__decode_wav_bytes(self.__audio_data)
+            audio, sample_rate = self.__decode_wav_bytes(self.__audio_data)
         else:
-            audio = whisper.load_audio(filepath)
+            import soundfile as sf
+
+            audio, sample_rate = sf.read(filepath, dtype="float32")
+            # Convert stereo to mono if needed
+            if audio.ndim > 1:
+                audio = audio.mean(axis=1)
         self.__logger.debug(f"Audio decode took {time.monotonic() - t0:.2f}s")
 
+        # Resample to 16kHz if needed
+        if sample_rate != 16000:
+            import librosa
+
+            audio = librosa.resample(audio, orig_sr=sample_rate, target_sr=16000)
+            sample_rate = 16000
+
+        audio_duration = len(audio) / sample_rate
+
+        # Run VAD to find speech regions
         t0 = time.monotonic()
-        try:
-            result = whisper.transcribe(
-                self.__model,
-                audio,
-                language=self.__language,
-                vad=True,
-                temperature=0.0,
-                condition_on_previous_text=False,
-                fp16=self.__device != "cpu",
-                compute_word_confidence=False,
-                refine_whisper_precision=0,
-                trust_whisper_timestamps=True,
-                verbose=False,
+        vad_segments = _run_vad(audio, sample_rate)
+        self.__logger.debug(f"VAD took {time.monotonic() - t0:.2f}s, found {len(vad_segments)} speech segments")
+
+        if not vad_segments:
+            self.__logger.info("No speech detected by VAD")
+            return self.__process_transcription([])
+
+        # Transcribe each VAD segment and collect words
+        t0 = time.monotonic()
+        all_words = []
+
+        generate_kwargs = {"language": self.__language} if self.__language else {}
+
+        for seg_start, seg_end in vad_segments:
+            start_sample = int(seg_start * sample_rate)
+            end_sample = int(seg_end * sample_rate)
+            segment_audio = audio[start_sample:end_sample]
+
+            result = self.__pipe(
+                segment_audio.copy(),
+                return_timestamps="word",
+                generate_kwargs=generate_kwargs,
             )
-        except AssertionError:
-            self.__logger.warning(
-                "Efficient path failed, falling back to naive approach"
-            )
-            result = whisper.transcribe(
-                self.__model,
-                audio,
-                language=self.__language,
-                vad=True,
-                temperature=0.0,
-                beam_size=1,
-                condition_on_previous_text=False,
-                fp16=self.__device != "cpu",
-                compute_word_confidence=False,
-                refine_whisper_precision=0,
-                trust_whisper_timestamps=True,
-                verbose=False,
-            )
+
+            # Offset-correct word timestamps by VAD region start
+            for chunk in result.get("chunks", []):
+                ts = chunk.get("timestamp", (0.0, 0.0))
+                word_start = (ts[0] or 0.0) + seg_start
+                word_end = (ts[1] or word_start) + seg_start
+                text = chunk.get("text", "").strip()
+                if text:
+                    all_words.append({"text": text, "start": word_start, "end": word_end})
+
         elapsed = time.monotonic() - t0
-        audio_duration = len(audio) / 16000
         rtf = elapsed / audio_duration if audio_duration > 0 else 0
         self.__logger.info(
             f"Whisper inference took {elapsed:.2f}s for {audio_duration:.1f}s audio ({1/rtf:.1f}x realtime)"
             if rtf > 0 else f"Whisper inference took {elapsed:.2f}s"
         )
 
-        return self.__process_transcription(result.get("segments", []))
+        # Group words into subtitle-sized segments
+        grouped_segments = _group_words_into_segments(all_words)
+
+        return self.__process_transcription(grouped_segments)
 
     def transcribe(self) -> dict:
         """

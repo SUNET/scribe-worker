@@ -7,10 +7,10 @@ requires-python = ">=3.10"
 dependencies = [
     "daemonize>=2.5.0",
     "gpustat>=1.1.1",
-    "openai-whisper",
     "pyannote-audio>=4.0.3",
     "pydantic-settings>=2.12.0",
     "transformers>=5.0.0",
-    "whisper-timestamped",
+    "soundfile",
+    "librosa",
     "onnxruntime",
 ]
