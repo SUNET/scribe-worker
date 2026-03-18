@@ -62,6 +62,9 @@ def diarization_init(hf_token: str) -> Optional[Pipeline]:
 def load_whisper_model(model_name: str, logger: logging.Logger) -> object:
     """
     Load and cache a whisper model. Returns cached model if already loaded.
+
+    HuggingFace models (containing '/') use the transformers backend so the
+    model's own tokenizer is used instead of OpenAI's default tiktoken one.
     """
     if model_name in _model_cache:
         return _model_cache[model_name]
@@ -74,9 +77,14 @@ def load_whisper_model(model_name: str, logger: logging.Logger) -> object:
     if "@" in load_name:
         load_name, revision = load_name.rsplit("@", 1)
 
+    # HuggingFace models use the transformers backend so the model's own
+    # tokenizer is loaded automatically via WhisperProcessor.from_pretrained.
+    is_hf_model = "/" in load_name
+    backend = "transformers" if is_hf_model else "openai-whisper"
+
     # If a specific revision is needed, download via huggingface_hub first
     # and pass the local path to whisper-timestamped (bypasses its revision=None)
-    if revision and "/" in load_name:
+    if revision and is_hf_model:
         load_name = snapshot_download(
             load_name,
             revision=revision,
@@ -85,13 +93,13 @@ def load_whisper_model(model_name: str, logger: logging.Logger) -> object:
         logger.info(f"Using '{model_name}' revision '{revision}' from {load_name}")
 
     try:
-        model = whisper.load_model(load_name, device=device)
+        model = whisper.load_model(load_name, device=device, backend=backend)
     except NotImplementedError:
         logger.warning(f"Failed to load model on {device}, falling back to CPU")
         device = "cpu"
-        model = whisper.load_model(load_name, device=device)
+        model = whisper.load_model(load_name, device=device, backend=backend)
 
-    logger.info(f"Loaded model '{model_name}' on {device}")
+    logger.info(f"Loaded model '{model_name}' on {device} (backend={backend})")
     _model_cache[model_name] = model
     return model
 
