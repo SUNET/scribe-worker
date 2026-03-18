@@ -2,6 +2,7 @@ import io
 import logging
 import numpy as np
 import os
+import re
 import time
 import torch
 import warnings
@@ -164,7 +165,7 @@ class WhisperAudioTranscriber:
         chunks = []
 
         for segment in segments:
-            text = segment.get("text", "").strip()
+            text = re.sub(r" {2,}", " ", segment.get("text", "")).strip()
 
             if not text:
                 continue
