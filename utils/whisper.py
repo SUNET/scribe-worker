@@ -188,8 +188,8 @@ def load_whisper_model(model_name: str, logger: logging.Logger) -> tuple:
 
 def _tokens_to_words(processor, token_ids, token_timestamps) -> list[dict]:
     """
-    Convert token-level IDs and timestamps from model.generate() into
-    word-level entries: [{"text": ..., "start": ..., "end": ...}, ...]
+    Convert token-level IDs and timestamps from model.generate() (DTW mode)
+    into word-level entries: [{"text": ..., "start": ..., "end": ...}, ...]
     """
     words = []
     current_tokens = []  # list of (decoded_text, timestamp)
@@ -228,6 +228,46 @@ def _tokens_to_words(processor, token_ids, token_timestamps) -> list[dict]:
             )
 
     return words
+
+
+def _parse_timestamp_tokens(processor, token_ids) -> list[dict]:
+    """
+    Parse Whisper's timestamp tokens from generate() output into segments.
+    Fallback when DTW token timestamps are not available.
+
+    Whisper encodes timestamps as special tokens: <|0.00|>, <|0.02|>, ...
+    Token ID = timestamp_begin + (seconds / 0.02).
+    """
+    tokenizer = processor.tokenizer
+    timestamp_begin = tokenizer.convert_tokens_to_ids("<|0.00|>")
+
+    segments = []
+    current_text_tokens = []
+    current_start = None
+
+    for tid in token_ids:
+        tid = int(tid)
+
+        # Skip non-timestamp special tokens (lang, task, BOS, EOS, etc.)
+        if tid in tokenizer.all_special_ids and tid < timestamp_begin:
+            continue
+
+        if tid >= timestamp_begin:
+            timestamp = round((tid - timestamp_begin) * 0.02, 2)
+            if current_start is None:
+                current_start = timestamp
+            elif current_text_tokens:
+                text = tokenizer.decode(current_text_tokens, skip_special_tokens=True).strip()
+                if text:
+                    segments.append(
+                        {"start": current_start, "end": timestamp, "text": text}
+                    )
+                current_text_tokens = []
+                current_start = timestamp
+        else:
+            current_text_tokens.append(tid)
+
+    return segments
 
 
 def _group_words_into_segments(words: list[dict]) -> list[dict]:
@@ -524,20 +564,21 @@ class WhisperAudioTranscriber:
             self.__logger.info("No speech detected by VAD")
             return self.__process_transcription([])
 
-        # Transcribe each VAD segment and collect words
+        # Transcribe each VAD segment and collect results
         t0 = time.monotonic()
         all_words = []
+        all_segments = []
+        use_dtw = True  # Try DTW first; disable on failure
 
         generate_kwargs = {
             "return_timestamps": True,
-            "return_token_timestamps": True,
             "task": "transcribe",
         }
         if self.__language:
             generate_kwargs["language"] = self.__language
 
         for seg_start, seg_end in vad_segments:
-            # Skip very short segments that can crash DTW
+            # Skip very short segments
             if seg_end - seg_start < 0.5:
                 continue
 
@@ -545,36 +586,53 @@ class WhisperAudioTranscriber:
             end_sample = int(seg_end * sample_rate)
             segment_audio = audio[start_sample:end_sample]
 
-            inputs = self.__processor(
+            input_features = self.__processor(
                 segment_audio,
                 sampling_rate=sample_rate,
                 return_tensors="pt",
-                return_attention_mask=True,
-            )
-            input_features = inputs.input_features.to(
-                self.__model.device, dtype=self.__model.dtype
-            )
-            attention_mask = inputs.attention_mask.to(self.__model.device)
+            ).input_features.to(self.__model.device, dtype=self.__model.dtype)
 
+            # Try DTW word-level timestamps
+            if use_dtw:
+                try:
+                    output = self.__model.generate(
+                        input_features,
+                        return_token_timestamps=True,
+                        **generate_kwargs,
+                    )
+                    words = _tokens_to_words(
+                        self.__processor,
+                        output["sequences"][0],
+                        output["token_timestamps"][0],
+                    )
+                    for w in words:
+                        w["start"] += seg_start
+                        w["end"] += seg_start
+                        all_words.append(w)
+                    continue
+                except (RuntimeError, IndexError, KeyError):
+                    use_dtw = False
+                    self.__logger.info(
+                        "DTW token timestamps not supported by this model, "
+                        "falling back to segment-level timestamps"
+                    )
+
+            # Fallback: segment-level timestamps from timestamp tokens
             try:
-                output = self.__model.generate(
-                    input_features, attention_mask=attention_mask, **generate_kwargs
-                )
-            except RuntimeError:
+                output = self.__model.generate(input_features, **generate_kwargs)
+            except (RuntimeError, IndexError):
                 self.__logger.debug(
                     f"Skipping VAD segment {seg_start:.2f}-{seg_end:.2f}s (generate failed)"
                 )
                 continue
 
-            words = _tokens_to_words(
-                self.__processor, output.sequences[0], output.token_timestamps[0]
+            segments = _parse_timestamp_tokens(
+                self.__processor, output["sequences"][0]
             )
-
-            # Offset-correct word timestamps by VAD region start
-            for w in words:
-                w["start"] += seg_start
-                w["end"] += seg_start
-                all_words.append(w)
+            for seg in segments:
+                seg["start"] += seg_start
+                seg["end"] += seg_start
+                all_segments.append(seg)
 
         elapsed = time.monotonic() - t0
         rtf = elapsed / audio_duration if audio_duration > 0 else 0
@@ -583,8 +641,10 @@ class WhisperAudioTranscriber:
             if rtf > 0 else f"Whisper inference took {elapsed:.2f}s"
         )
 
-        # Group words into subtitle-sized segments
+        # Combine DTW word-level results and fallback segment-level results
         grouped_segments = _group_words_into_segments(all_words)
+        grouped_segments.extend(all_segments)
+        grouped_segments.sort(key=lambda s: s["start"])
 
         return self.__process_transcription(grouped_segments)
 
