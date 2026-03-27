@@ -20,9 +20,7 @@ import multiprocessing as mp
 import os
 import psutil
 import requests
-import signal
 import sys
-import threading
 
 import whisper_timestamped as whisper
 
@@ -45,13 +43,7 @@ if not zap and not download:
     from utils.job import TranscriptionJob
 
 
-def _ignore_sigint():
-    """Ignore SIGINT in child processes; the main process handles shutdown."""
-    signal.signal(signal.SIGINT, signal.SIG_IGN)
-
-
 def healthcheck() -> None:
-    _ignore_sigint()
     while True:
         # Gather load average, memory usage and GPU usage
         load_avg = psutil.cpu_percent()
@@ -96,98 +88,49 @@ def healthcheck() -> None:
         sleep(10)
 
 
-def fail_job(uuid: str) -> None:
-    """Mark a job as failed via the API."""
+def mainloop(worker_id: int) -> None:
+    """
+    Main function to fetch jobs and process them.
+    """
+
+    logger.info(f"[{worker_id}] Starting worker process...")
+
     api_url = f"{settings.API_BACKEND_URL}/api/{settings.API_VERSION}/job"
-    try:
-        response = requests.put(
-            f"{api_url}/{uuid}",
-            json={
-                "status": "failed",
-                "error": "Worker shutdown",
-                "transcribed_seconds": None,
-            },
-            cert=(settings.SSL_CERTFILE, settings.SSL_KEYFILE),
+
+    while True:
+        sleep_time = randint(5, 60)
+
+        logger.debug(
+            f"[{worker_id}] Sleeping for {sleep_time} seconds before fetching a new job..."
         )
-        response.raise_for_status()
-        logger.info(f"Job {uuid}: marked as failed (shutdown)")
-    except requests.RequestException as e:
-        logger.error(f"Job {uuid}: failed to mark as failed: {e}")
 
+        sleep(sleep_time)
 
-def run_job(worker_id: int, active_jobs: dict) -> None:
-    """
-    Fetch and process a single transcription job.
-    """
-    _ignore_sigint()
-    api_url = f"{settings.API_BACKEND_URL}/api/{settings.API_VERSION}/job"
-
-    try:
         with TranscriptionJob(
             logger,
             api_url,
             hf_token=settings.HF_TOKEN,
-            active_jobs=active_jobs,
         ) as job:
             job.start()
-    except Exception:
-        logger.exception(f"[{worker_id}] Worker crashed")
 
 
 def main() -> None:
     logger.info("Starting transcription service...")
 
-    manager = mp.Manager()
-    active_jobs = manager.dict()
+    if no_healthcheck:
+        processes = []
+    else:
+        processes = [mp.Process(target=healthcheck)]
 
-    hc = None
-    if not no_healthcheck:
-        hc = mp.Process(target=healthcheck)
-        hc.start()
+    processes += [
+        mp.Process(target=mainloop, args=(i,)) for i in range(settings.WORKERS)
+    ]
 
-    shutdown_event = threading.Event()
-    worker_id = 0
-    workers: list[mp.Process] = []
+    for p in processes:
+        p.start()
 
-    def shutdown(signum, frame):
-        logger.info(f"Received signal {signum}, shutting down...")
-        shutdown_event.set()
-
-    signal.signal(signal.SIGTERM, shutdown)
-    signal.signal(signal.SIGINT, shutdown)
-
-    while not shutdown_event.is_set():
-        # Reap finished workers
-        workers = [w for w in workers if w.is_alive()]
-
-        if len(workers) < settings.WORKERS:
-            p = mp.Process(target=run_job, args=(worker_id, active_jobs))
-            p.start()
-            workers.append(p)
-            worker_id += 1
-        else:
-            logger.info(f"All {settings.WORKERS} slots busy, waiting...")
-
-        shutdown_event.wait(timeout=randint(5, 60))
-
-    # Mark active jobs as failed
-    for uuid in list(active_jobs.values()):
-        fail_job(uuid)
-
-    # Wait for workers to finish, then terminate stragglers
-    for w in workers:
-        w.join(timeout=10)
-        if w.is_alive():
-            logger.warning(f"Worker {w.pid} still alive, terminating...")
-            w.terminate()
-            w.join(timeout=5)
-
-    if hc and hc.is_alive():
-        hc.terminate()
-        hc.join(timeout=5)
-
-    manager.shutdown()
-    logger.info("Shutdown complete.")
+    for p in processes:
+        p.join()
 
 
 def daemon_kill() -> None:
