@@ -168,7 +168,7 @@ def main() -> None:
         else:
             logger.info(f"All {settings.WORKERS} slots busy, waiting...")
 
-        shutdown_event.wait(timeout=10)
+        shutdown_event.wait(timeout=randint(5, 60))
 
     # Mark active jobs as failed
     for uuid in list(active_jobs.values()):
