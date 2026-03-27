@@ -15,6 +15,7 @@ from typing import Optional
 from utils.settings import get_settings
 
 warnings.filterwarnings("ignore", module="pyannote")
+warnings.filterwarnings("ignore", module="transformers")
 settings = get_settings()
 
 if settings.HF_TOKEN:
@@ -22,6 +23,9 @@ if settings.HF_TOKEN:
 
 os.environ["TORCH_HUB_TRUST_REPO"] = "1"
 os.environ["PYANNOTE_METRICS_ENABLED"] = "false"
+os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+os.environ["DO_NOT_TRACK"] = "1"
+os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
 
 
 def get_torch_device() -> tuple:
@@ -440,8 +444,6 @@ class WhisperAudioTranscriber:
             ts_ms = (start_ms, end_ms)
             duration = end_time - start_time
 
-            avg_score = None
-
             if len(text) > 90:
                 mid_index = len(text) // 2
                 split_index = text.rfind(" ", 0, mid_index)
@@ -460,7 +462,6 @@ class WhisperAudioTranscriber:
                         "end": mid_time,
                         "text": first_part,
                         "duration": mid_time - start_time,
-                        "avg_score": avg_score,
                     }
                 )
 
@@ -470,7 +471,6 @@ class WhisperAudioTranscriber:
                         "end": end_time,
                         "text": second_part,
                         "duration": end_time - mid_time,
-                        "avg_score": avg_score,
                     }
                 )
 
@@ -482,7 +482,6 @@ class WhisperAudioTranscriber:
                             self.__seconds_to_srt_time(mid_time),
                         ),
                         "text": first_part,
-                        "avg_score": avg_score,
                     }
                 )
 
@@ -494,7 +493,6 @@ class WhisperAudioTranscriber:
                             ts_ms[1],
                         ),
                         "text": second_part,
-                        "avg_score": avg_score,
                     }
                 )
 
@@ -506,7 +504,6 @@ class WhisperAudioTranscriber:
                     "end": end_time,
                     "text": text,
                     "duration": duration,
-                    "avg_score": avg_score,
                 }
             )
 
@@ -515,7 +512,6 @@ class WhisperAudioTranscriber:
                     "timestamp": (start_time, end_time),
                     "timestamp_ms": ts_ms,
                     "text": text,
-                    "avg_score": avg_score,
                 }
             )
 
@@ -745,7 +741,6 @@ class WhisperAudioTranscriber:
             chunk_start = chunk["timestamp"][0]
             chunk_end = chunk["timestamp"][1]
             chunk_text = chunk["text"]
-            avg_score = chunk.get("avg_score")
 
             chunk_middle = (chunk_start + chunk_end) / 2
             dominant_speaker = self.__get_speaker(diarization, chunk_middle)
@@ -753,19 +748,14 @@ class WhisperAudioTranscriber:
                 diarization, chunk_start, chunk_end
             )
 
-            segment = {
+            aligned_segments.append({
                 "start": float(chunk_start),
                 "end": float(chunk_end),
                 "text": chunk_text.strip(),
                 "speaker": dominant_speaker,
                 "active_speakers": active_speakers,
                 "duration": float(chunk_end - chunk_start),
-            }
-
-            if avg_score is not None:
-                segment["avg_score"] = avg_score
-
-            aligned_segments.append(segment)
+            })
 
         return aligned_segments
 
@@ -864,13 +854,13 @@ class WhisperAudioTranscriber:
         if current_position >= len(caption):
             current_position = len(caption) - 1
 
-        characater = caption[current_position]
+        character = caption[current_position]
 
-        while characater != " ":
+        while character != " ":
             if current_position == 0 or len(caption) <= current_position:
                 break
 
-            characater = caption[current_position]
+            character = caption[current_position]
             current_position -= 1
 
         first_line = caption[: current_position + 1].strip()

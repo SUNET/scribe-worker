@@ -3,28 +3,25 @@ import multiprocessing as mp
 import os
 import psutil
 import requests
+import shutil
 import signal
-import sys
 import tempfile
 
 import torch
 
-from daemonize import Daemonize
 from huggingface_hub import snapshot_download
 from random import randint
 from time import sleep
 from utils.args import parse_arguments
-from utils.log import get_fileno, get_logger
+from utils.job import TranscriptionJob
+from utils.log import get_logger
 from utils.settings import get_settings
 
 
 mp.set_start_method("spawn", force=True)
 settings = get_settings()
 logger = get_logger()
-foreground, pidfile, zap, _, _, _, no_healthcheck, download = parse_arguments()
-
-if not zap and not download:
-    from utils.job import TranscriptionJob
+_, _, _, download = parse_arguments()
 
 
 def _ignore_sigint():
@@ -70,6 +67,7 @@ def healthcheck() -> None:
                 f"{settings.API_BACKEND_URL}/api/{settings.API_VERSION}/healthcheck",
                 json=health_data,
                 cert=(settings.SSL_CERTFILE, settings.SSL_KEYFILE),
+                timeout=10,
             )
             res.raise_for_status()
         except requests.RequestException as e:
@@ -90,6 +88,7 @@ def fail_job(uuid: str) -> None:
                 "transcribed_seconds": None,
             },
             cert=(settings.SSL_CERTFILE, settings.SSL_KEYFILE),
+            timeout=10,
         )
         response.raise_for_status()
         logger.info(f"Job {uuid}: marked as failed (shutdown)")
@@ -97,12 +96,16 @@ def fail_job(uuid: str) -> None:
         logger.error(f"Job {uuid}: failed to mark as failed: {e}")
 
 
-def run_job(worker_id: int, jobs_dir: str, stop_event: mp.Event) -> None:
+def run_job(worker_id: int, jobs_dir: str, work_dir: str, stop_event: mp.Event) -> None:
     """
     Fetch and process transcription jobs until stopped.
     """
     _ignore_sigint()
+
     api_url = f"{settings.API_BACKEND_URL}/api/{settings.API_VERSION}/job"
+
+    # Stagger initial fetch to avoid all workers hitting the API at once
+    stop_event.wait(timeout=randint(0, 10))
 
     while not stop_event.is_set():
         try:
@@ -111,6 +114,7 @@ def run_job(worker_id: int, jobs_dir: str, stop_event: mp.Event) -> None:
                 api_url,
                 hf_token=settings.HF_TOKEN,
                 jobs_dir=jobs_dir,
+                work_dir=work_dir,
             ) as job:
                 job.start()
         except Exception:
@@ -122,19 +126,19 @@ def run_job(worker_id: int, jobs_dir: str, stop_event: mp.Event) -> None:
 def main() -> None:
     logger.info("Starting transcription service...")
 
-    jobs_dir = os.path.join(tempfile.gettempdir(), "transcribe_worker_jobs")
-    os.makedirs(jobs_dir, exist_ok=True)
+    work_dir = tempfile.mkdtemp(prefix="transcribe_worker_")
+    os.chmod(work_dir, 0o700)
+    jobs_dir = os.path.join(work_dir, "jobs")
+    os.makedirs(jobs_dir, mode=0o700)
 
-    hc = None
-    if not no_healthcheck:
-        hc = mp.Process(target=healthcheck)
-        hc.start()
+    hc = mp.Process(target=healthcheck)
+    hc.start()
 
     stop_event = mp.Event()
     workers: list[mp.Process] = []
 
     for i in range(settings.WORKERS):
-        p = mp.Process(target=run_job, args=(i, jobs_dir, stop_event))
+        p = mp.Process(target=run_job, args=(i, jobs_dir, work_dir, stop_event))
         p.start()
         workers.append(p)
 
@@ -148,7 +152,15 @@ def main() -> None:
     # Block until shutdown signal
     signal.pause()
 
-    # Mark active jobs as failed
+    # Wait for workers to finish, then terminate stragglers
+    for w in workers:
+        w.join(timeout=15)
+        if w.is_alive():
+            logger.warning(f"Worker {w.pid} still alive, terminating...")
+            w.terminate()
+            w.join(timeout=5)
+
+    # Mark active jobs as failed (after workers are done so job files are stable)
     for filename in os.listdir(jobs_dir):
         filepath = os.path.join(jobs_dir, filename)
         try:
@@ -160,50 +172,12 @@ def main() -> None:
         except Exception:
             pass
 
-    # Wait for workers to finish, then terminate stragglers
-    for w in workers:
-        w.join(timeout=15)
-        if w.is_alive():
-            logger.warning(f"Worker {w.pid} still alive, terminating...")
-            w.terminate()
-            w.join(timeout=5)
-
-    if hc and hc.is_alive():
+    if hc.is_alive():
         hc.terminate()
         hc.join(timeout=5)
 
+    shutil.rmtree(work_dir, ignore_errors=True)
     logger.info("Shutdown complete.")
-
-
-def daemon_kill() -> None:
-    try:
-        pid = int(open(pidfile, "r").read().strip())
-        print(f"Zapping transcription service with PID {pid}...")
-        os.kill(pid, 9)
-        os.remove(pidfile)
-    except FileNotFoundError:
-        print("PID file not found, nothing to zap.")
-
-
-def daemon_running() -> None:
-    """
-    Check if the daemon is running by checking the PID file.
-    """
-    if not os.path.exists(pidfile):
-        return False
-
-    try:
-        with open(pidfile, "r") as f:
-            pid = int(f.read().strip())
-        os.kill(pid, 0)
-    except FileNotFoundError:
-        return
-    except ProcessLookupError:
-        os.remove(pidfile)
-        return
-
-    print(f"Daemon is already running with PID {pid}.")
-    sys.exit(1)
 
 
 def download_models() -> None:
@@ -217,14 +191,12 @@ def download_models() -> None:
         for model_name in lang_models.values():
             models.add(model_name)
 
-    print(sorted(models))
-
     for model_name in sorted(models):
         revision = None
         if "@" in model_name:
             model_name, revision = model_name.rsplit("@", 1)
 
-        print(
+        logger.info(
             f"Downloading '{model_name}'"
             + (f" (revision: {revision})" if revision else "")
             + "..."
@@ -243,34 +215,18 @@ def download_models() -> None:
         ]
         snapshot_download(**kwargs)
 
-        print("  Done.")
+        logger.info("  Done.")
 
     # Pre-download Silero VAD model
-    print("Downloading Silero VAD model...")
+    logger.info("Downloading Silero VAD model...")
     torch.hub.load("snakers4/silero-vad", "silero_vad", trust_repo=True)
-    print("  Done.")
+    logger.info("  Done.")
 
-    print("\nAll models downloaded.")
+    logger.info("\nAll models downloaded.")
 
 
 if __name__ == "__main__":
     if download:
         download_models()
-    elif zap:
-        daemon_kill()
-    elif foreground:
-        daemon_running()
-        main()
     else:
-        daemon_running()
-        daemon = Daemonize(
-            app="transcription_service",
-            pid=pidfile,
-            action=main,
-            foreground=False,
-            verbose=True,
-            keep_fds=[get_fileno()],
-            auto_close_fds=False,
-            chdir=os.getcwd(),
-        )
-        daemon.start()
+        main()

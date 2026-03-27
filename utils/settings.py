@@ -7,7 +7,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import ClassVar
 from utils.args import parse_arguments
 
-_, _, _, envfile, _, _, _, _ = parse_arguments()
+envfile, _, _, _ = parse_arguments()
 
 
 class Settings(BaseSettings):

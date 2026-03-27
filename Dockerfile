@@ -25,4 +25,4 @@ COPY main.py .
 COPY utils/ utils/
 
 # Run worker
-CMD ["uv", "run", "python", "main.py", "--foreground", "--debug", "--no-healthcheck"]
+CMD ["uv", "run", "python", "main.py", "--debug"]

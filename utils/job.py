@@ -22,9 +22,6 @@ class JobStatusEnum(str, Enum):
     Enum representing the status of a job.
     """
 
-    UPLOADING = "uploading"
-    UPLOADED = "uploaded"
-    PENDING = "pending"
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -37,11 +34,13 @@ class TranscriptionJob:
         api_url: str,
         hf_token: Optional[str] = None,
         jobs_dir: Optional[str] = None,
+        work_dir: Optional[str] = None,
     ):
         self.logger = logger
         self.api_url = api_url
         self.hf_token = hf_token
         self._jobs_dir = jobs_dir
+        self._work_dir = work_dir
         self._job_file = None
 
     def __enter__(self) -> "TranscriptionJob":
@@ -243,7 +242,7 @@ class TranscriptionJob:
 
     def __downsample_audio(self) -> bool:
         try:
-            self.mp4_data = downsample_audio(self.__temp_file.name)
+            self.mp4_data = downsample_audio(self.__temp_file.name, work_dir=self._work_dir)
         except Exception as e:
             self.logger.error(f"Error during audio downsampling: {e}")
             self.mp4_data = None
@@ -277,6 +276,7 @@ class TranscriptionJob:
             response = requests.get(
                 f"{self.api_url}/next",
                 cert=(settings.SSL_CERTFILE, settings.SSL_KEYFILE),
+                timeout=10,
             )
             response.raise_for_status()
             job = response.json()["result"]
@@ -298,10 +298,11 @@ class TranscriptionJob:
                 f"{self.api_url}/{self.user_id}/{self.uuid}/file",
                 cert=(settings.SSL_CERTFILE, settings.SSL_KEYFILE),
                 stream=True,
+                timeout=600,
             )
             response.raise_for_status()
 
-            self.__temp_file = tempfile.NamedTemporaryFile(delete=True)
+            self.__temp_file = tempfile.NamedTemporaryFile(delete=True, dir=self._work_dir)
             for chunk in response.iter_content(chunk_size=1024 * 1024):
                 self.__temp_file.write(chunk)
             self.__temp_file.flush()
@@ -328,6 +329,7 @@ class TranscriptionJob:
                     "transcribed_seconds": transcribed_seconds,
                 },
                 cert=(settings.SSL_CERTFILE, settings.SSL_KEYFILE),
+                timeout=10,
             )
             response.raise_for_status()
         except requests.RequestException as e:
@@ -349,6 +351,7 @@ class TranscriptionJob:
                 "file": (f"{self.uuid}.mp4", io.BytesIO(self.mp4_data), "video/mp4")
             },
             cert=(settings.SSL_CERTFILE, settings.SSL_KEYFILE),
+            timeout=600,
         )
         response.raise_for_status()
         self.mp4_data = None
@@ -362,6 +365,7 @@ class TranscriptionJob:
             json=json_data,
             headers={"Content-Type": "application/json"},
             cert=(settings.SSL_CERTFILE, settings.SSL_KEYFILE),
+            timeout=30,
         )
         if response.status_code != 200:
             self.logger.error(f"Upload {output_format} response: {response.text}")

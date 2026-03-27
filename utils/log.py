@@ -10,7 +10,7 @@ def get_logger():
     """
 
     logger = logging.getLogger(__name__)
-    _, _, _, _, debug, logfile, _, _ = parse_arguments()
+    _, debug, logfile, _ = parse_arguments()
 
     if not logger.hasHandlers():
         formatter = logging.Formatter(
@@ -32,10 +32,3 @@ def get_logger():
         logger.setLevel(logging.INFO)
 
     return logger
-
-
-def get_fileno():
-    logger = get_logger()
-    handle = logger.handlers[0]
-
-    return handle.stream.fileno()

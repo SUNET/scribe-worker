@@ -100,13 +100,13 @@ def downscale_video(input_path: str) -> bytes:
     return _run_cmd_pipe(command)
 
 
-def downsample_audio(input_path: str) -> bytes:
+def downsample_audio(input_path: str, work_dir: str = None) -> bytes:
     """
     Downsample audio to an MP4 with faststart (moov atom at the start).
     Uses a temp file since faststart requires a seekable output.
     Returns the MP4 data as bytes.
     """
-    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=True) as tmp:
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=True, dir=work_dir) as tmp:
         command = [
             settings.FFMPEG_PATH,
             "-nostdin",
