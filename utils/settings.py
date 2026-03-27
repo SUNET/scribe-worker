@@ -48,13 +48,16 @@ class Settings(BaseSettings):
             "slower transcription (higher accuracy)": "openai/whisper-large-v3",
         },
         "Finnish": {
-            "slower transcription (higher accuracy)": "openai/whisper-large-v3",
+            "slower transcription (higher accuracy)": "Finnish-NLP/whisper-large-finnish-v3",
         },
         "Danish": {
-            "slower transcription (higher accuracy)": "openai/whisper-large-v3",
+            "slower transcription (higher accuracy)": "syvai/hviske-v2",
         },
         "Norwegian": {
-            "slower transcription (higher accuracy)": "openai/whisper-large-v3",
+            "slower transcription (higher accuracy)": "NbAiLabBeta/nb-whisper-large",
+        },
+        "Norwegian (verbatim)": {
+            "slower transcription (higher accuracy)": "NbAiLabBeta/nb-whisper-large-verbatim",
         },
         "French": {
             "slower transcription (higher accuracy)": "openai/whisper-large-v3",
