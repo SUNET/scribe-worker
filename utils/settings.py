@@ -15,9 +15,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-
-
 import json
 
 from functools import lru_cache
@@ -42,9 +39,7 @@ class Settings(BaseSettings):
         validate_assignment=True,
     )
 
-    DEBUG: bool = True
     WORKERS: int = 2
-    FILE_STORAGE_DIR: str = "./storage"
     API_BACKEND_URL: str = ""
     API_VERSION: str = "v1"
     FFMPEG_PATH: str = "ffmpeg"
