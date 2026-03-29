@@ -1,18 +1,16 @@
-import gc
 import io
 import logging
 import os
 import requests
 import tempfile
 import time
-import torch
 
 from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 from typing import Optional
 from utils import settings
 from utils.media import downscale_video, downsample_audio, has_video_stream, transcode_to_wav
-from utils.whisper import WhisperAudioTranscriber
+from utils.whisper import WhisperAudioTranscriber, free_vram
 
 settings = settings.get_settings()
 
@@ -412,8 +410,6 @@ class TranscriptionJob:
         self.mp4_data = None
         self.__close_temp_file()
 
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        free_vram()
 
         return True

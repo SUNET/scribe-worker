@@ -1,3 +1,4 @@
+import gc
 import io
 import logging
 import numpy as np
@@ -35,36 +36,24 @@ def get_torch_device() -> tuple:
         return "cpu", torch.float32
 
 
-_model_cache: dict[str, object] = {}
-_diarization_cache: Optional[Pipeline] = None
-
-
 def diarization_init(hf_token: str) -> Optional[Pipeline]:
     """
     Initializes the diarization pipeline using HuggingFace's PyAnnote.
     Uses the community version for better performance.
-    Returns cached pipeline if already loaded.
     """
-    global _diarization_cache
-    if _diarization_cache is not None:
-        return _diarization_cache
-
     device, _ = get_torch_device()
 
-    _diarization_cache = Pipeline.from_pretrained(
+    pipeline = Pipeline.from_pretrained(
         "pyannote/speaker-diarization-community-1", token=hf_token
     ).to(torch.device(device))
 
-    return _diarization_cache
+    return pipeline
 
 
 def load_whisper_model(model_name: str, logger: logging.Logger) -> object:
     """
-    Load and cache a whisper model. Returns cached model if already loaded.
+    Load a whisper model.
     """
-    if model_name in _model_cache:
-        return _model_cache[model_name]
-
     device, _ = get_torch_device()
 
     # Parse optional revision (e.g. "kblab/kb-whisper-large@strict")
@@ -91,8 +80,18 @@ def load_whisper_model(model_name: str, logger: logging.Logger) -> object:
         model = whisper.load_model(load_name, device=device)
 
     logger.info(f"Loaded model '{model_name}' on {device}")
-    _model_cache[model_name] = model
     return model
+
+
+def free_vram() -> None:
+    """
+    Free VRAM by running garbage collection and clearing GPU caches.
+    """
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    if torch.backends.mps.is_available():
+        torch.mps.empty_cache()
 
 
 class WhisperAudioTranscriber:
@@ -333,6 +332,11 @@ class WhisperAudioTranscriber:
             if rtf > 0 else f"Whisper inference took {elapsed:.2f}s"
         )
 
+        del self.__model
+        self.__model = None
+        free_vram()
+        self.__logger.debug("Model unloaded and VRAM freed")
+
         return self.__process_transcription(result.get("segments", []))
 
     def transcribe(self) -> dict:
@@ -403,6 +407,11 @@ class WhisperAudioTranscriber:
             max_speakers=max_speakers,
         )
         self.__logger.debug(f"Diarization inference took {time.monotonic() - t0:.2f}s")
+
+        del self.__diarization_pipeline
+        self.__diarization_pipeline = None
+        free_vram()
+        self.__logger.debug("Diarization pipeline unloaded and VRAM freed")
 
         aligned_segments = self.__align_speakers(self.__result["chunks"], diarization)
 
