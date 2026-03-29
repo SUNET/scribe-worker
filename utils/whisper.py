@@ -1,4 +1,3 @@
-import gc
 import io
 import logging
 import numpy as np
@@ -81,17 +80,6 @@ def load_whisper_model(model_name: str, logger: logging.Logger) -> object:
 
     logger.info(f"Loaded model '{model_name}' on {device}")
     return model
-
-
-def free_vram() -> None:
-    """
-    Free VRAM by running garbage collection and clearing GPU caches.
-    """
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    if torch.backends.mps.is_available():
-        torch.mps.empty_cache()
 
 
 class WhisperAudioTranscriber:
@@ -332,11 +320,6 @@ class WhisperAudioTranscriber:
             if rtf > 0 else f"Whisper inference took {elapsed:.2f}s"
         )
 
-        del self.__model
-        self.__model = None
-        free_vram()
-        self.__logger.debug("Model unloaded and VRAM freed")
-
         return self.__process_transcription(result.get("segments", []))
 
     def transcribe(self) -> dict:
@@ -407,11 +390,6 @@ class WhisperAudioTranscriber:
             max_speakers=max_speakers,
         )
         self.__logger.debug(f"Diarization inference took {time.monotonic() - t0:.2f}s")
-
-        del self.__diarization_pipeline
-        self.__diarization_pipeline = None
-        free_vram()
-        self.__logger.debug("Diarization pipeline unloaded and VRAM freed")
 
         aligned_segments = self.__align_speakers(self.__result["chunks"], diarization)
 

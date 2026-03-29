@@ -1,5 +1,6 @@
 import io
 import logging
+import multiprocessing as mp
 import os
 import requests
 import tempfile
@@ -10,7 +11,6 @@ from enum import Enum
 from typing import Optional
 from utils import settings
 from utils.media import downscale_video, downsample_audio, has_video_stream, transcode_to_wav
-from utils.whisper import WhisperAudioTranscriber, free_vram
 
 settings = settings.get_settings()
 
@@ -191,33 +191,76 @@ class TranscriptionJob:
 
         return True
 
-    def __transcribe(self) -> bool:
+    @staticmethod
+    def __transcribe_worker(
+        wav_data, model, language, speakers, hf_token, output_format, result_dict
+    ):
         """
-        Transcribe the audio file using Hugging Face Whisper.
+        Run transcription in a child process so all memory (RAM + VRAM)
+        is reclaimed by the OS when the process exits.
         """
+        from utils.whisper import WhisperAudioTranscriber
+
+        logging.basicConfig(level=logging.DEBUG)
+        logger = logging.getLogger("transcribe_worker")
+
         transcriber = WhisperAudioTranscriber(
-            self.logger,
-            audio_data=self.wav_data,
-            model_name=self.model,
-            language=self.language,
-            speakers=self.speakers,
-            hf_token=self.hf_token,
+            logger,
+            audio_data=wav_data,
+            model_name=model,
+            language=language,
+            speakers=speakers,
+            hf_token=hf_token,
         )
 
         transcribed_seconds = transcriber.transcribe()
 
         if transcribed_seconds is None:
-            return None
+            result_dict["transcribed_seconds"] = None
+            return
 
-        self.srt_data = transcriber.subtitles()
+        result_dict["transcribed_seconds"] = transcribed_seconds
+        result_dict["srt_data"] = transcriber.subtitles()
 
-        if self.output_format == "txt":
+        if output_format == "txt":
             drz = transcriber.diarization()
-            self.json_data = drz if drz else None
+            result_dict["json_data"] = drz if drz else None
         else:
-            self.json_data = None
+            result_dict["json_data"] = None
+
+    def __transcribe(self) -> bool:
+        """
+        Transcribe the audio file in a subprocess to avoid memory leaks.
+        """
+        result_dict = mp.Manager().dict()
+
+        p = mp.Process(
+            target=self.__transcribe_worker,
+            args=(
+                self.wav_data,
+                self.model,
+                self.language,
+                self.speakers,
+                self.hf_token,
+                self.output_format,
+                result_dict,
+            ),
+        )
+        p.start()
+        p.join()
 
         self.wav_data = None
+
+        if p.exitcode != 0:
+            self.logger.error(f"Job {self.uuid}: transcription subprocess exited with code {p.exitcode}")
+            return None
+
+        transcribed_seconds = result_dict.get("transcribed_seconds")
+        if transcribed_seconds is None:
+            return None
+
+        self.srt_data = result_dict.get("srt_data")
+        self.json_data = result_dict.get("json_data")
 
         return transcribed_seconds
 
@@ -409,7 +452,5 @@ class TranscriptionJob:
         self.json_data = None
         self.mp4_data = None
         self.__close_temp_file()
-
-        free_vram()
 
         return True
