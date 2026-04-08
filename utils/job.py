@@ -131,7 +131,6 @@ class TranscriptionJob:
             )
             return False
 
-
         self.logger.debug("Transcribing file")
         transcribed_seconds = self.__transcribe()
 
