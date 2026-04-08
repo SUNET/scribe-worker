@@ -2,6 +2,7 @@ import json
 import logging
 import requests
 import subprocess
+import shutil
 
 from enum import Enum
 from pathlib import Path
@@ -110,6 +111,16 @@ class TranscriptionJob:
             )
             return False
 
+        self.logger.debug("Out of phase check")
+        if not self.__detect_and_fix_out_of_phase():
+            self.logger.error("Out of phase check failed")
+            self.__put_status(
+                JobStatusEnum.FAILED,
+                error="Out-of-phase check failed",
+                transcribed_seconds=None,
+            )
+            return False
+
         self.logger.debug("Transcoding file")
         if not self.__transcode_file():
             self.logger.error("Transcoding failed")
@@ -119,6 +130,7 @@ class TranscriptionJob:
                 transcribed_seconds=None,
             )
             return False
+
 
         self.logger.debug("Transcribing file")
         transcribed_seconds = self.__transcribe()
@@ -224,6 +236,29 @@ class TranscriptionJob:
             raise e
 
         return True
+
+    def __run_cmd_output(self, command: list) -> str:
+        """
+        Run a command using subprocess.run.
+        Raises an exception if the command fails.
+        """
+        try:
+            command_str = " ".join(command)
+            self.logger.debug(f"Executing command: {command_str}")
+            result = subprocess.run(command, capture_output=True)
+
+            if result.returncode != 0:
+                raise subprocess.CalledProcessError(
+                    returncode=result.returncode,
+                    cmd=command,
+                    output=result.stdout.decode(),
+                    stderr=result.stderr.decode(),
+                )
+        except Exception as e:
+            self.logger.error(f"Error when executing command: {e}")
+            raise e
+
+        return result.stderr.decode()
 
     def __downscale_file(self) -> bool:
         """
@@ -478,3 +513,129 @@ class TranscriptionJob:
                 self.logger.info(f"Deleted file {file}")
 
         return True
+
+    def __detect_and_fix_out_of_phase(self):
+
+        if TranscriptionJob.__detect_out_of_phase(self):
+            self.logger.debug("Out of phase detected")
+            TranscriptionJob.__fix_out_of_phase(self)
+        return True
+
+    def __extract_RMS_db_level(output):
+        output = str(output)
+        for line in output.splitlines():
+            if "RMS level dB" in line:
+                return float(line.split()[-1])
+
+    def __detect_out_of_phase(self):
+        path = str(Path(self.api_file_storage_dir) / f"{self.filename}")
+
+        sample_failed = False
+        out_of_phase_detected = False
+
+        # Test samples first to minimize load:
+        dur = None
+
+        dur_result = subprocess.run(
+            [
+                "ffprobe",
+                "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                path
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        self.logger.info(f"Dur_result: {dur_result}")
+        dur = float(dur_result.stdout.strip())
+
+        if dur is None: 
+            self.logger.error("ERROR: duration calculation failed.")
+            return False
+
+        for pos in (0.25, 0.5, 0.75):
+            t = dur * pos
+
+            command_sample = [
+                settings.FFMPEG_PATH,
+                "-ss",
+                str(t),
+                "-t",
+                "3",
+                "-vn",
+                "-i",
+                path,
+                "-af",
+                "pan=mono|c0=c0+c1,astats=metadata=1:measure_overall=1",
+                "-f",
+                "null",
+                "-"
+            ]
+
+            try:
+                out_sample = self.__run_cmd_output(command_sample)
+                self.logger.debug(f"Out-of-phase sample out: {out_sample}")
+            except Exception as e: 
+                self.logger.error(f"Error sampling for out of phase check: {e}")
+                return False
+
+            RMS_db_level = TranscriptionJob.__extract_RMS_db_level(out_sample)
+
+            #Detecting extremely low volumes
+            if RMS_db_level < -50:
+                sample_failed =  True
+
+        #Full_file:
+        if sample_failed:
+            command_full = [
+                settings.FFMPEG_PATH,
+                "-i",
+                path,
+                "-af",
+                "pan=mono|c0=c0+c1,astats=metadata=1:measure_overall=1",
+                "-f",
+                "null",
+                "-"
+            ]
+
+            try:
+                out_full = self.__run_cmd_output(command_full)
+                self.logger.debug(f"Out-of-phase full out: {out_full}")
+
+            except Exception as e:
+                self.logger.error(f"Error testing for out of phase check: {e}")
+                return False
+
+            RMS_db_level = TranscriptionJob.__extract_RMS_db_level(out_full)
+
+            # Detecting extremely low volumes
+            if RMS_db_level < -50:
+                return True
+
+        return False
+
+
+    def __fix_out_of_phase(self):
+        try:
+            path = str(Path(self.api_file_storage_dir) / f"{self.filename}")
+            temp_path = str(Path(self.api_file_storage_dir) / f"{self.filename}_temp.wav")
+
+            command = [
+                settings.FFMPEG_PATH,
+                "-y",
+                "-i",
+                path,
+                "-af",
+                "aeval='-val(0)':c=same",
+                temp_path
+            ]
+            cmd_out = self.__run_cmd_output(command)
+            self.logger.debug(f"Fix out-of-phase output: {cmd_out}")
+
+            shutil.move(temp_path, path)
+
+        except Exception as e:
+            self.logger.error(f"Out of phase fix failed: {e}")
+
