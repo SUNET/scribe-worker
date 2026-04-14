@@ -205,7 +205,7 @@ if __name__ == "__main__":
             pid=pidfile,
             action=main,
             foreground=False,
-            verbose=True,
+            verbose=False,
             keep_fds=[get_fileno()],
             auto_close_fds=False,
             chdir=os.getcwd(),

@@ -10,8 +10,16 @@ from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 from typing import Optional
 from utils import settings
-from utils.media import downscale_video, downsample_audio, has_video_stream, transcode_to_wav
+from utils.media import (
+    downsample_audio,
+    downscale_video,
+    has_video_stream,
+    transcode_to_wav,
+)
+from utils.whisper import WhisperAudioTranscriber
+from utils.log import get_logger
 
+log = get_logger()
 settings = settings.get_settings()
 
 
@@ -35,13 +43,8 @@ def _transcribe_worker(
     Run transcription in a child process so all memory (RAM + VRAM)
     is reclaimed by the OS when the process exits.
     """
-    from utils.whisper import WhisperAudioTranscriber
-
-    logging.basicConfig(level=logging.DEBUG)
-    logger = logging.getLogger("transcribe_worker")
 
     transcriber = WhisperAudioTranscriber(
-        logger,
         audio_data=wav_data,
         model_name=model,
         language=language,
@@ -252,7 +255,9 @@ class TranscriptionJob:
         self.wav_data = None
 
         if p.exitcode != 0:
-            self.logger.error(f"Job {self.uuid}: transcription subprocess exited with code {p.exitcode}")
+            self.logger.error(
+                f"Job {self.uuid}: transcription subprocess exited with code {p.exitcode}"
+            )
             return None
 
         transcribed_seconds = result_dict.get("transcribed_seconds")

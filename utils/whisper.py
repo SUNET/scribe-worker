@@ -11,10 +11,12 @@ import whisper_timestamped as whisper
 from huggingface_hub import snapshot_download
 from pyannote.audio import Pipeline
 from typing import Optional
+from utils.log import get_logger
 from utils.settings import get_settings
 
-warnings.filterwarnings("ignore", module="pyannote")
+logger = get_logger()
 settings = get_settings()
+warnings.filterwarnings("ignore", module="pyannote")
 
 if settings.HF_TOKEN:
     os.environ["HF_TOKEN"] = settings.HF_TOKEN
@@ -85,7 +87,6 @@ def load_whisper_model(model_name: str, logger: logging.Logger) -> object:
 class WhisperAudioTranscriber:
     def __init__(
         self,
-        logger: logging.Logger,
         audio_path: Optional[str] = None,
         model_name: Optional[str] = "base",
         language: Optional[str] = "sv",
@@ -293,6 +294,8 @@ class WhisperAudioTranscriber:
                 refine_whisper_precision=0,
                 trust_whisper_timestamps=True,
                 verbose=False,
+                beam_size=3,
+                best_of=3,
             )
         except AssertionError:
             self.__logger.warning(
@@ -317,7 +320,8 @@ class WhisperAudioTranscriber:
         rtf = elapsed / audio_duration if audio_duration > 0 else 0
         self.__logger.info(
             f"Whisper inference took {elapsed:.2f}s for {audio_duration:.1f}s audio ({1/rtf:.1f}x realtime)"
-            if rtf > 0 else f"Whisper inference took {elapsed:.2f}s"
+            if rtf > 0
+            else f"Whisper inference took {elapsed:.2f}s"
         )
 
         return self.__process_transcription(result.get("segments", []))
@@ -548,23 +552,3 @@ class WhisperAudioTranscriber:
         new_caption = f"{first_line}\n{second_line}"
 
         return new_caption
-
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.DEBUG)
-    logger = logging.getLogger("whisper_transcriber")
-
-    audio_file = "test.wav"
-    transcriber = WhisperAudioTranscriber(
-        logger=logger,
-        audio_path=audio_file,
-        model_name="base",
-        language="sv",
-        speakers=2,
-    )
-
-    transcribed_seconds = transcriber.transcribe()
-    print(f"Transcribed seconds: {transcribed_seconds}")
-
-    subtitles = transcriber.subtitles()
-    print(f"Subtitles:\n{subtitles}")
