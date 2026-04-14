@@ -40,15 +40,10 @@ warnings.filterwarnings("ignore", module="pyannote")
 if settings.HF_TOKEN:
     os.environ["HF_TOKEN"] = settings.HF_TOKEN
 
-os.environ["TORCH_HUB_TRUST_REPO"] = "1"
 os.environ["PYANNOTE_METRICS_ENABLED"] = "false"
-
-if settings.HF_TOKEN:
-    os.environ["HF_TOKEN"] = settings.HF_TOKEN
-
-os.environ["TORCH_HUB_TRUST_REPO"] = "1"
 os.environ["PYANNOTE_METRICS_ENABLED"] = "0"
-set_telemetry_metrics(False, save_choice_as_default=True)
+
+set_telemetry_metrics(False)
 
 
 def get_torch_device() -> tuple:
@@ -63,20 +58,12 @@ def get_torch_device() -> tuple:
         return "cpu", torch.float32
 
 
-_model_cache: dict[str, object] = {}
-_diarization_cache: Optional[Pipeline] = None
-
-
 def diarization_init(hf_token: str) -> Optional[Pipeline]:
     """
     Initializes the diarization pipeline using HuggingFace's PyAnnote.
     Uses the community version for better performance.
-    Returns cached pipeline if already loaded.
+    Returns pipeline.
     """
-    global _diarization_cache
-    if _diarization_cache is not None:
-        return _diarization_cache
-
     device, _ = get_torch_device()
 
     pipeline = Pipeline.from_pretrained(
@@ -390,6 +377,10 @@ class WhisperAudioTranscriber:
         Perform speaker diarization on the transcribed audio.
         """
 
+        self.__logger.info(f"Starting diarization with speakers={self.__speakers}")
+
+        t0 = time.monotonic()
+
         speakers = int(self.__speakers)
 
         match speakers:
@@ -432,6 +423,8 @@ class WhisperAudioTranscriber:
         self.__logger.debug(f"Diarization inference took {time.monotonic() - t0:.2f}s")
 
         aligned_segments = self.__align_speakers(self.__result["chunks"], diarization)
+
+        self.__logger.info(f"Diarization completed, took {time.monotonic() - t0:.2f}s")
 
         return {
             "full_transcription": self.__result["full_transcription"],
