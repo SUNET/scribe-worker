@@ -29,10 +29,19 @@ from huggingface_hub import snapshot_download
 from pyannote.audio import Pipeline
 from pyannote.audio.telemetry import set_telemetry_metrics
 from typing import Optional
+from utils.log import get_logger
 from utils.settings import get_settings
 
-warnings.filterwarnings("ignore", module="pyannote")
+logger = get_logger()
 settings = get_settings()
+
+warnings.filterwarnings("ignore", module="pyannote")
+
+if settings.HF_TOKEN:
+    os.environ["HF_TOKEN"] = settings.HF_TOKEN
+
+os.environ["TORCH_HUB_TRUST_REPO"] = "1"
+os.environ["PYANNOTE_METRICS_ENABLED"] = "false"
 
 if settings.HF_TOKEN:
     os.environ["HF_TOKEN"] = settings.HF_TOKEN
@@ -40,6 +49,7 @@ if settings.HF_TOKEN:
 os.environ["TORCH_HUB_TRUST_REPO"] = "1"
 os.environ["PYANNOTE_METRICS_ENABLED"] = "0"
 set_telemetry_metrics(False, save_choice_as_default=True)
+
 
 def get_torch_device() -> tuple:
     """
@@ -69,20 +79,17 @@ def diarization_init(hf_token: str) -> Optional[Pipeline]:
 
     device, _ = get_torch_device()
 
-    _diarization_cache = Pipeline.from_pretrained(
+    pipeline = Pipeline.from_pretrained(
         "pyannote/speaker-diarization-community-1", token=hf_token
     ).to(torch.device(device))
 
-    return _diarization_cache
+    return pipeline
 
 
 def load_whisper_model(model_name: str, logger: logging.Logger) -> object:
     """
-    Load and cache a whisper model. Returns cached model if already loaded.
+    Load a whisper model.
     """
-    if model_name in _model_cache:
-        return _model_cache[model_name]
-
     device, _ = get_torch_device()
 
     # Parse optional revision (e.g. "kblab/kb-whisper-large@strict")
@@ -109,14 +116,13 @@ def load_whisper_model(model_name: str, logger: logging.Logger) -> object:
         model = whisper.load_model(load_name, device=device)
 
     logger.info(f"Loaded model '{model_name}' on {device}")
-    _model_cache[model_name] = model
+
     return model
 
 
 class WhisperAudioTranscriber:
     def __init__(
         self,
-        logger: logging.Logger,
         audio_path: Optional[str] = None,
         model_name: Optional[str] = "base",
         language: Optional[str] = "sv",
@@ -324,6 +330,8 @@ class WhisperAudioTranscriber:
                 refine_whisper_precision=0,
                 trust_whisper_timestamps=True,
                 verbose=False,
+                beam_size=3,
+                best_of=3,
             )
         except AssertionError:
             self.__logger.warning(
@@ -348,7 +356,8 @@ class WhisperAudioTranscriber:
         rtf = elapsed / audio_duration if audio_duration > 0 else 0
         self.__logger.info(
             f"Whisper inference took {elapsed:.2f}s for {audio_duration:.1f}s audio ({1/rtf:.1f}x realtime)"
-            if rtf > 0 else f"Whisper inference took {elapsed:.2f}s"
+            if rtf > 0
+            else f"Whisper inference took {elapsed:.2f}s"
         )
 
         return self.__process_transcription(result.get("segments", []))
@@ -579,23 +588,3 @@ class WhisperAudioTranscriber:
         new_caption = f"{first_line}\n{second_line}"
 
         return new_caption
-
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.DEBUG)
-    logger = logging.getLogger("whisper_transcriber")
-
-    audio_file = "test.wav"
-    transcriber = WhisperAudioTranscriber(
-        logger=logger,
-        audio_path=audio_file,
-        model_name="base",
-        language="sv",
-        speakers=2,
-    )
-
-    transcribed_seconds = transcriber.transcribe()
-    print(f"Transcribed seconds: {transcribed_seconds}")
-
-    subtitles = transcriber.subtitles()
-    print(f"Subtitles:\n{subtitles}")

@@ -15,22 +15,31 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import gc
 import io
 import logging
+import multiprocessing as mp
 import os
 import requests
 import tempfile
 import time
-import torch
+
 
 from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 from typing import Optional
 from utils import settings
-from utils.media import downscale_video, downsample_audio, has_video_stream, transcode_to_wav
-from utils.whisper import WhisperAudioTranscriber
 
+from utils.media import (
+    downsample_audio,
+    downscale_video,
+    has_video_stream,
+    transcode_to_wav,
+)
+
+from utils.whisper import WhisperAudioTranscriber
+from utils.log import get_logger
+
+log = get_logger()
 settings = settings.get_settings()
 
 
@@ -45,6 +54,38 @@ class JobStatusEnum(str, Enum):
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
     FAILED = "failed"
+
+
+def _transcribe_worker(
+    wav_data, model, language, speakers, hf_token, output_format, result_dict
+):
+    """
+    Run transcription in a child process so all memory (RAM + VRAM)
+    is reclaimed by the OS when the process exits.
+    """
+
+    transcriber = WhisperAudioTranscriber(
+        audio_data=wav_data,
+        model_name=model,
+        language=language,
+        speakers=speakers,
+        hf_token=hf_token,
+    )
+
+    transcribed_seconds = transcriber.transcribe()
+
+    if transcribed_seconds is None:
+        result_dict["transcribed_seconds"] = None
+        return
+
+    result_dict["transcribed_seconds"] = transcribed_seconds
+    result_dict["srt_data"] = transcriber.subtitles()
+
+    if output_format == "txt":
+        drz = transcriber.diarization()
+        result_dict["json_data"] = drz if drz else None
+    else:
+        result_dict["json_data"] = None
 
 
 class TranscriptionJob:
@@ -212,31 +253,39 @@ class TranscriptionJob:
 
     def __transcribe(self) -> bool:
         """
-        Transcribe the audio file using Hugging Face Whisper.
+        Transcribe the audio file in a subprocess to avoid memory leaks.
         """
-        transcriber = WhisperAudioTranscriber(
-            self.logger,
-            audio_data=self.wav_data,
-            model_name=self.model,
-            language=self.language,
-            speakers=self.speakers,
-            hf_token=self.hf_token,
+        result_dict = mp.Manager().dict()
+
+        p = mp.Process(
+            target=_transcribe_worker,
+            args=(
+                self.wav_data,
+                self.model,
+                self.language,
+                self.speakers,
+                self.hf_token,
+                self.output_format,
+                result_dict,
+            ),
         )
+        p.start()
+        p.join()
 
-        transcribed_seconds = transcriber.transcribe()
+        self.wav_data = None
 
+        if p.exitcode != 0:
+            self.logger.error(
+                f"Job {self.uuid}: transcription subprocess exited with code {p.exitcode}"
+            )
+            return None
+
+        transcribed_seconds = result_dict.get("transcribed_seconds")
         if transcribed_seconds is None:
             return None
 
-        self.srt_data = transcriber.subtitles()
-
-        if self.output_format == "txt":
-            drz = transcriber.diarization()
-            self.json_data = drz if drz else None
-        else:
-            self.json_data = None
-
-        self.wav_data = None
+        self.srt_data = result_dict.get("srt_data")
+        self.json_data = result_dict.get("json_data")
 
         return transcribed_seconds
 
@@ -428,9 +477,5 @@ class TranscriptionJob:
         self.json_data = None
         self.mp4_data = None
         self.__close_temp_file()
-
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
 
         return True

@@ -4,9 +4,10 @@ import subprocess
 import tempfile
 import wave
 
-from utils import settings
+from utils.log import get_logger
+from utils.settings import get_settings
 
-settings = settings.get_settings()
+settings = get_settings()
 
 
 def _run_cmd_pipe(command: list[str]) -> bytes:
@@ -32,18 +33,24 @@ def has_video_stream(input_path: str) -> bool:
     """
     Check if the input file contains a video stream using ffprobe.
     """
-    ffprobe_path = os.path.join(
-        os.path.dirname(settings.FFMPEG_PATH), "ffprobe"
-    ) if os.path.dirname(settings.FFMPEG_PATH) else "ffprobe"
+    ffprobe_path = (
+        os.path.join(os.path.dirname(settings.FFMPEG_PATH), "ffprobe")
+        if os.path.dirname(settings.FFMPEG_PATH)
+        else "ffprobe"
+    )
 
     try:
         result = subprocess.run(
             [
                 ffprobe_path,
-                "-v", "error",
-                "-select_streams", "v:0",
-                "-show_entries", "stream=codec_type",
-                "-of", "csv=p=0",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=codec_type",
+                "-of",
+                "csv=p=0",
                 input_path,
             ],
             stdout=subprocess.PIPE,
