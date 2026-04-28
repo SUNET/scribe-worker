@@ -36,9 +36,20 @@ from utils.settings import get_settings
 mp.set_start_method("spawn", force=True)
 settings = get_settings()
 logger = get_logger()
-foreground, pidfile, zap, _, _, _, no_healthcheck, download = parse_arguments()
+(
+    foreground,
+    pidfile,
+    zap,
+    _,
+    _,
+    _,
+    no_healthcheck,
+    download,
+    drain,
+    drainfile,
+) = parse_arguments()
 
-if not zap and not download:
+if not zap and not download and not drain:
     from utils.job import TranscriptionJob
 
 
@@ -105,6 +116,12 @@ def mainloop(worker_id: int) -> None:
 
         sleep(sleep_time)
 
+        if os.path.exists(drainfile):
+            logger.info(
+                f"[{worker_id}] Drain file {drainfile} present, skipping new job."
+            )
+            continue
+
         with TranscriptionJob(
             logger,
             api_url,
@@ -163,6 +180,19 @@ def daemon_running() -> None:
     sys.exit(1)
 
 
+def drain_create() -> None:
+    """Create drain file. Workers stop fetching new jobs while it exists."""
+    try:
+        with open(drainfile, "w") as f:
+            f.write(str(os.getpid()))
+        print(f"Drain file created at {drainfile}.")
+        print("Workers will finish ongoing jobs and stop fetching new ones.")
+        print(f"Remove the file to resume: rm {drainfile}")
+    except OSError as e:
+        print(f"Failed to create drain file {drainfile}: {e}")
+        sys.exit(1)
+
+
 def download_models() -> None:
     """Download all configured whisper models."""
     if settings.HF_TOKEN:
@@ -210,6 +240,8 @@ def download_models() -> None:
 if __name__ == "__main__":
     if download:
         download_models()
+    elif drain:
+        drain_create()
     elif zap:
         daemon_kill()
     elif foreground:

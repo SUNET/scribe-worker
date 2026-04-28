@@ -70,6 +70,19 @@ def parse_arguments() -> tuple:
         help="Download all configured models and exit.",
     )
 
+    parser.add_argument(
+        "--drain",
+        action="store_true",
+        help="Create drain file and exit. While drain file exists, no new jobs start; ongoing jobs finish.",
+    )
+
+    parser.add_argument(
+        "--drainfile",
+        type=str,
+        default="/tmp/worker.drain",
+        help="Path to drain file.",
+    )
+
     args = parser.parse_args()
 
     return (
@@ -81,4 +94,6 @@ def parse_arguments() -> tuple:
         args.logfile,
         args.no_healthcheck,
         args.download,
+        args.drain,
+        args.drainfile,
     )
