@@ -63,6 +63,9 @@ class Settings(BaseSettings):
         "English": {
             "slower transcription (higher accuracy)": "openai/whisper-large-v3",
         },
+        "English (verbatim)": {
+            "slower transcription (higher accuracy)": "openai/whisper-large-v3",
+        },
         "Finnish": {
             "slower transcription (higher accuracy)": "Finnish-NLP/whisper-large-finnish-v3",
         },
