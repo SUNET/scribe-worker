@@ -10,6 +10,8 @@ frameworks and machine learning models.
 
 Third-party notices:
 
+Third-party frameworks and software:
+
 OpenAI Whisper
 Copyright (c) 2022 OpenAI
 Licensed under the MIT License
@@ -24,6 +26,8 @@ FFmpeg
 Licensed under the GNU Lesser General Public License v2.1 or later (LGPL v2.1+).
 https://github.com/FFmpeg/FFmpeg
 
+Fine-tuned Whisper models:
+
 KB-Whisper Large
 Developed by the National Library of Sweden (Kungliga biblioteket)
 Licensed under Apache License 2.0
@@ -33,6 +37,7 @@ NB-Whisper Large
 Developed by the National Library of Norway (Nasjonalbiblioteket)
 Licensed under Apache License 2.0
 https://huggingface.co/NbAiLab/nb-whisper-large
+
 
 All third-party software and models remain the property of their
 respective copyright holders and are licensed under their own
