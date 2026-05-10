@@ -12,6 +12,11 @@ This project is licensed under the Apache License, Version 2.0. See [LICENSE](LI
 
 Copyright (c) 2025-2026 Sunet. Contributor: Kristofer Hallin.
 
+## Third-party Notices
+
+This repository includes a `NOTICE` file containing attribution
+information for third-party components.
+
 ## Contributing
 
 Contributions are welcome! Please feel free to open issues or submit pull requests.
