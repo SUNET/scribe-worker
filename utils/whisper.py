@@ -122,6 +122,10 @@ class WhisperAudioTranscriber:
         self.__audio_data = audio_data
         self.__hf_token = hf_token
         self.__device, _ = get_torch_device()
+
+        if language == "Northern Sámi":
+            language = "Norwegian"  # Use Norwegian model for Northern Sámi, as recommended by HuggingFace
+
         self.__language = (
             language.split("(")[0].strip().lower() if language else language
         )
