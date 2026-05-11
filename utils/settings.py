@@ -78,6 +78,12 @@ class Settings(BaseSettings):
         "Norwegian (verbatim)": {
             "slower transcription (higher accuracy)": "NbAiLabBeta/nb-whisper-large-verbatim",
         },
+        "Icelandic": {
+            "slower transcription (higher accuracy)": "language-and-voice-lab/whisper-large-icelandic-30k-steps-1000h",
+        },
+        "Nothern Sámi": {
+            "slower transcription (higher accuracy)": "NbAiLab/whisper-large-sme",
+        },
         "French": {
             "slower transcription (higher accuracy)": "openai/whisper-large-v3",
         },
