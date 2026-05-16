@@ -81,7 +81,7 @@ class Settings(BaseSettings):
         "Icelandic": {
             "slower transcription (higher accuracy)": "language-and-voice-lab/whisper-large-icelandic-30k-steps-1000h",
         },
-        "Northern Sámi": {
+        "Northern Sámi (Experimental)": {
             "slower transcription (higher accuracy)": "NbAiLab/whisper-large-sme",
         },
         "French": {
