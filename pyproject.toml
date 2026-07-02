@@ -10,7 +10,7 @@ dependencies = [
     "openai-whisper",
     "pyannote-audio>=4.0.3",
     "pydantic-settings>=2.12.0",
-    "transformers>=5.0.0",
+    "transformers>=5.3.0",
     "whisper-timestamped",
     "onnxruntime",
 ]
