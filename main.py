@@ -21,6 +21,7 @@ import os
 import psutil
 import requests
 import sys
+import torch
 
 import whisper_timestamped as whisper
 
@@ -28,6 +29,7 @@ from daemonize import Daemonize
 from huggingface_hub import snapshot_download
 from random import randint
 from time import sleep
+from typing import Optional
 from utils.args import parse_arguments
 from utils.log import get_fileno, get_logger
 from utils.settings import get_settings
@@ -53,55 +55,75 @@ if not zap and not download and not drain:
     from utils.job import TranscriptionJob
 
 
+def _gpu_payload(gpu) -> dict:
+    return {
+        "index": gpu.index,
+        "name": gpu.name,
+        "memory_used": gpu.memory_used,
+        "memory_total": gpu.memory_total,
+        "utilization": gpu.utilization,
+        "temperature": gpu.temperature,
+        "power_draw": gpu.power_draw,
+    }
+
+
 def healthcheck() -> None:
+    hostname = os.uname()[1]
+
     while True:
         # Gather load average, memory usage and GPU usage
         load_avg = psutil.cpu_percent()
         memory_usage = psutil.virtual_memory().percent
-        gpu_usage = []
 
         try:
-            gpu_stat = gpustat.GPUStatCollection.new_query()
+            gpus = list(gpustat.GPUStatCollection.new_query())
         except Exception:
-            gpu_stat = []
+            gpus = []
 
-        for gpu in gpu_stat:
-            gpu_usage.append(
+        if len(gpus) > 1:
+            # Multiple GPUs: report each one under its own worker_id so
+            # per-GPU load can be tracked separately.
+            health_data_list = [
                 {
-                    "index": gpu.index,
-                    "name": gpu.name,
-                    "memory_used": gpu.memory_used,
-                    "memory_total": gpu.memory_total,
-                    "utilization": gpu.utilization,
-                    "temperature": gpu.temperature,
-                    "power_draw": gpu.power_draw,
+                    "worker_id": f"{hostname}-{gpu.index}",
+                    "load_avg": load_avg,
+                    "memory_usage": memory_usage,
+                    "gpu_usage": [_gpu_payload(gpu)],
                 }
-            )
+                for gpu in gpus
+            ]
+        else:
+            health_data_list = [
+                {
+                    "worker_id": hostname,
+                    "load_avg": load_avg,
+                    "memory_usage": memory_usage,
+                    "gpu_usage": [_gpu_payload(gpu) for gpu in gpus],
+                }
+            ]
 
-        health_data = {
-            "worker_id": os.uname()[1],
-            "load_avg": load_avg,
-            "memory_usage": memory_usage,
-            "gpu_usage": gpu_usage,
-        }
-
-        try:
-            res = requests.post(
-                f"{settings.API_BACKEND_URL}/api/{settings.API_VERSION}/healthcheck",
-                json=health_data,
-                cert=(settings.SSL_CERTFILE, settings.SSL_KEYFILE),
-            )
-            res.raise_for_status()
-        except requests.RequestException as e:
-            logger.error(f"Healthcheck failed: {e}")
+        for health_data in health_data_list:
+            try:
+                res = requests.post(
+                    f"{settings.API_BACKEND_URL}/api/{settings.API_VERSION}/healthcheck",
+                    json=health_data,
+                    cert=(settings.SSL_CERTFILE, settings.SSL_KEYFILE),
+                )
+                res.raise_for_status()
+            except requests.RequestException as e:
+                logger.error(f"Healthcheck failed: {e}")
 
         sleep(10)
 
 
-def mainloop(worker_id: int) -> None:
+def mainloop(worker_id: int, gpu_id: Optional[int] = None) -> None:
     """
     Main function to fetch jobs and process them.
     """
+
+    if gpu_id is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+        logger.info(f"[{worker_id}] Pinned to GPU {gpu_id}")
 
     logger.info(f"[{worker_id}] Starting worker process...")
 
@@ -133,13 +155,20 @@ def mainloop(worker_id: int) -> None:
 def main() -> None:
     logger.info("Starting transcription service...")
 
+    num_gpus = torch.cuda.device_count()
+    logger.info(f"Detected {num_gpus} GPU(s)")
+
     if no_healthcheck:
         processes = []
     else:
         processes = [mp.Process(target=healthcheck)]
 
     processes += [
-        mp.Process(target=mainloop, args=(i,)) for i in range(settings.WORKERS)
+        mp.Process(
+            target=mainloop,
+            args=(i, i % num_gpus if num_gpus > 0 else None),
+        )
+        for i in range(settings.WORKERS)
     ]
 
     for p in processes:
