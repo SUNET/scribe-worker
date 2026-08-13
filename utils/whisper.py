@@ -134,6 +134,7 @@ class WhisperAudioTranscriber:
         self.__speakers = speakers
         self.__diarization_pipeline = diarization_object
         self.__model = load_whisper_model(model_name, logger)
+        self.__decoded_audio = None
 
     def __decode_wav_bytes(self, wav_bytes: bytes) -> tuple:
         """
@@ -157,6 +158,15 @@ class WhisperAudioTranscriber:
         audio_array /= np.iinfo(dtype).max
 
         return audio_array, sample_rate
+
+    def __get_decoded_audio(self) -> tuple:
+        """
+        Decode self.__audio_data once and cache the result, since both
+        transcription and diarization need the same decoded array.
+        """
+        if self.__decoded_audio is None:
+            self.__decoded_audio = self.__decode_wav_bytes(self.__audio_data)
+        return self.__decoded_audio
 
     def __seconds_to_srt_time(self, seconds) -> str:
         """
@@ -302,7 +312,7 @@ class WhisperAudioTranscriber:
     def __transcribe_audio(self, filepath: Optional[str] = None) -> dict:
         t0 = time.monotonic()
         if self.__audio_data:
-            audio, _ = self.__decode_wav_bytes(self.__audio_data)
+            audio, _ = self.__get_decoded_audio()
         else:
             audio = whisper.load_audio(filepath)
         self.__logger.debug(f"Audio decode took {time.monotonic() - t0:.2f}s")
@@ -411,7 +421,7 @@ class WhisperAudioTranscriber:
             )
 
         if self.__audio_data:
-            audio_array, sample_rate = self.__decode_wav_bytes(self.__audio_data)
+            audio_array, sample_rate = self.__get_decoded_audio()
             waveform = torch.from_numpy(audio_array).unsqueeze(0)
             audio_input = {"waveform": waveform, "sample_rate": sample_rate}
         else:
