@@ -46,6 +46,25 @@ class Settings(BaseSettings):
 
     HF_TOKEN: str = ""
 
+    # Ask whisper-timestamped for a per-word confidence score. Word level
+    # timestamps are produced either way; this only controls the score, which
+    # costs an extra pass over the decoded tokens. Turn off to trade the
+    # confidence display in the editor for a slightly faster transcription.
+    WORD_CONFIDENCE: bool = True
+
+    # Subtitle shaping. SUBTITLE_LINE_LENGTH should match CHARACTER_LIMIT in
+    # transcribe-ui: the worker wraps captions at it, the editor flags lines
+    # that exceed it, and they will disagree visibly if they drift apart.
+    SUBTITLE_LINE_LENGTH: int = 42
+
+    # Segments longer than this many characters are cut in two, at a word
+    # boundary when word timings are available.
+    SEGMENT_SPLIT_LENGTH: int = 90
+
+    # Two consecutive one-line captions are merged into one two-line subtitle
+    # when the silence between them is shorter than this, in seconds.
+    SUBTITLE_MERGE_GAP: float = 1.8
+
     # SSL configuration
     SSL_CERTFILE: str = ""
     SSL_KEYFILE: str = ""

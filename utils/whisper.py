@@ -31,6 +31,12 @@ from pyannote.audio.telemetry import set_telemetry_metrics
 from typing import Optional
 from utils.log import get_logger
 from utils.settings import get_settings
+from utils.words import (
+    average_confidence,
+    build_payload,
+    normalize_words,
+    split_index_for_text,
+)
 
 logger = get_logger()
 settings = get_settings()
@@ -40,7 +46,6 @@ warnings.filterwarnings("ignore", module="pyannote")
 if settings.HF_TOKEN:
     os.environ["HF_TOKEN"] = settings.HF_TOKEN
 
-os.environ["PYANNOTE_METRICS_ENABLED"] = "false"
 os.environ["PYANNOTE_METRICS_ENABLED"] = "0"
 
 set_telemetry_metrics(False)
@@ -49,6 +54,7 @@ set_telemetry_metrics(False)
 def get_torch_device() -> tuple:
     """
     Determine the device to use for model inference.
+    Returns (device, dtype).
     """
     if torch.cuda.is_available():
         return "cuda:0", torch.float16
@@ -129,12 +135,17 @@ class WhisperAudioTranscriber:
         self.__language = (
             language.split("(")[0].strip().lower() if language else language
         )
-        self.__result = None
         self.__logger = logger
         self.__speakers = speakers
         self.__diarization_pipeline = diarization_object
         self.__model = load_whisper_model(model_name, logger)
         self.__decoded_audio = None
+        self.__words = []
+        self.__transcribed_seconds = 0
+        self.__full_transcription = ""
+        # None until __process_transcription has run; an empty list is a
+        # legitimate result for silent audio, so the two must stay distinct.
+        self.__chunks = None
 
     def __decode_wav_bytes(self, wav_bytes: bytes) -> tuple:
         """
@@ -180,13 +191,49 @@ class WhisperAudioTranscriber:
         minutes, secs = divmod(remainder, 60)
         return f"{hours:02}:{minutes:02}:{secs:02},{millis:03}"
 
-    def __process_transcription(self, segments: list) -> dict:
+    def __segment_split_time(
+        self, start_time: float, end_time: float, words: list, first_part: str
+    ) -> float:
         """
-        Normalize and process transcription segments from whisper-timestamped.
+        Time to cut an over-long segment at: the end of the last word that
+        stays in the first half. Halving the duration would drift whenever the
+        two halves are not spoken at the same pace.
         """
+
+        word_split = split_index_for_text(words, first_part)
+
+        if word_split is not None:
+            boundary = words[word_split - 1]["e"]
+
+            if start_time < boundary < end_time:
+                return boundary
+
+        return start_time + (end_time - start_time) / 2
+
+    @staticmethod
+    def __split_text(text: str) -> tuple:
+        """
+        Split an over-long segment in two, on the space nearest the middle.
+        """
+
+        mid_index = len(text) // 2
+        split_index = text.rfind(" ", 0, mid_index)
+
+        if split_index == -1:
+            split_index = mid_index
+
+        return text[:split_index].strip(), text[split_index:].strip()
+
+    def __process_transcription(self, segments: list) -> None:
+        """
+        Normalize transcription segments from whisper-timestamped into the
+        chunks that subtitles and speaker alignment are built from, and
+        collect the per-word timings for the whole recording.
+        """
+
         full_transcription = ""
-        processed_segments = []
         chunks = []
+        all_words = []
 
         for segment in segments:
             text = segment.get("text", "").strip()
@@ -202,73 +249,30 @@ class WhisperAudioTranscriber:
 
             full_transcription += text
 
-            start_ms = self.__seconds_to_srt_time(start_time)
-            end_ms = self.__seconds_to_srt_time(end_time)
-            ts_ms = (start_ms, end_ms)
-            duration = end_time - start_time
+            words = normalize_words(segment.get("words"))
+            all_words.extend(words)
 
-            avg_score = None
-            words = segment.get("words", [])
-            if words:
-                confidences = [
-                    float(w.get("confidence", 0))
-                    for w in words
-                    if w.get("text", "").strip()
-                ]
-                if confidences:
-                    avg_score = round(float(sum(confidences) / len(confidences)), 4)
+            avg_score = average_confidence(words)
 
-            if len(text) > 90:
-                mid_index = len(text) // 2
-                split_index = text.rfind(" ", 0, mid_index)
+            if len(text) > settings.SEGMENT_SPLIT_LENGTH:
+                first_part, second_part = self.__split_text(text)
+                mid_time = self.__segment_split_time(
+                    start_time, end_time, words, first_part
+                )
 
-                if split_index == -1:
-                    split_index = mid_index
-
-                first_part = text[:split_index].strip()
-                second_part = text[split_index:].strip()
-
-                mid_time = start_time + duration / 2
-
-                processed_segments.append(
+                chunks.append(
                     {
                         "start": start_time,
                         "end": mid_time,
                         "text": first_part,
-                        "duration": mid_time - start_time,
                         "avg_score": avg_score,
                     }
                 )
 
-                processed_segments.append(
+                chunks.append(
                     {
                         "start": mid_time,
                         "end": end_time,
-                        "text": second_part,
-                        "duration": end_time - mid_time,
-                        "avg_score": avg_score,
-                    }
-                )
-
-                chunks.append(
-                    {
-                        "timestamp": (start_time, mid_time),
-                        "timestamp_ms": (
-                            ts_ms[0],
-                            self.__seconds_to_srt_time(mid_time),
-                        ),
-                        "text": first_part,
-                        "avg_score": avg_score,
-                    }
-                )
-
-                chunks.append(
-                    {
-                        "timestamp": (mid_time, end_time),
-                        "timestamp_ms": (
-                            self.__seconds_to_srt_time(mid_time),
-                            ts_ms[1],
-                        ),
                         "text": second_part,
                         "avg_score": avg_score,
                     }
@@ -276,40 +280,21 @@ class WhisperAudioTranscriber:
 
                 continue
 
-            processed_segments.append(
+            chunks.append(
                 {
                     "start": start_time,
                     "end": end_time,
                     "text": text,
-                    "duration": duration,
                     "avg_score": avg_score,
                 }
             )
 
-            chunks.append(
-                {
-                    "timestamp": (start_time, end_time),
-                    "timestamp_ms": ts_ms,
-                    "text": text,
-                    "avg_score": avg_score,
-                }
-            )
+        self.__words = all_words
+        self.__full_transcription = full_transcription
+        self.__chunks = chunks
+        self.__transcribed_seconds = chunks[-1]["end"] if chunks else 0
 
-        converted = {
-            "full_transcription": full_transcription,
-            "segments": processed_segments,
-            "chunks": chunks,
-            "speaker_count": 1,
-        }
-
-        self.__result = converted
-        self.__transcribed_seconds = (
-            processed_segments[-1]["end"] if processed_segments else 0
-        )
-
-        return converted
-
-    def __transcribe_audio(self, filepath: Optional[str] = None) -> dict:
+    def __transcribe_audio(self, filepath: Optional[str] = None) -> None:
         t0 = time.monotonic()
         if self.__audio_data:
             audio, _ = self.__get_decoded_audio()
@@ -327,7 +312,7 @@ class WhisperAudioTranscriber:
                 temperature=0.0,
                 condition_on_previous_text=False,
                 fp16=self.__device != "cpu",
-                compute_word_confidence=False,
+                compute_word_confidence=settings.WORD_CONFIDENCE,
                 refine_whisper_precision=0,
                 trust_whisper_timestamps=True,
                 verbose=False,
@@ -347,7 +332,7 @@ class WhisperAudioTranscriber:
                 beam_size=1,
                 condition_on_previous_text=False,
                 fp16=self.__device != "cpu",
-                compute_word_confidence=False,
+                compute_word_confidence=settings.WORD_CONFIDENCE,
                 refine_whisper_precision=0,
                 trust_whisper_timestamps=True,
                 verbose=False,
@@ -361,11 +346,12 @@ class WhisperAudioTranscriber:
             else f"Whisper inference took {elapsed:.2f}s"
         )
 
-        return self.__process_transcription(result.get("segments", []))
+        self.__process_transcription(result.get("segments", []))
 
-    def transcribe(self) -> dict:
+    def transcribe(self) -> Optional[float]:
         """
-        Transcribe the audio file and return the transcription result.
+        Transcribe the audio and return the number of seconds transcribed,
+        or None if transcription failed.
         """
         if not self.__audio_data and self.__audio_path:
             if not os.path.exists(self.__audio_path):
@@ -381,10 +367,20 @@ class WhisperAudioTranscriber:
             self.__logger.exception("Error during transcription")
             return None
 
-        if not self.__result:
+        if self.__chunks is None:
             raise Exception("Transcription result is not available.")
 
         return self.__transcribed_seconds
+
+    def words(self) -> Optional[dict]:
+        """
+        Per-word timings and confidences for the whole recording.
+
+        Returns None when the model produced no usable word data, so the
+        caller can skip the upload rather than store an empty result.
+        """
+
+        return build_payload(self.__words)
 
     def diarization(self) -> dict:
         """
@@ -393,7 +389,7 @@ class WhisperAudioTranscriber:
 
         self.__logger.info(f"Starting diarization with speakers={self.__speakers}")
 
-        t0 = time.monotonic()
+        started = time.monotonic()
 
         speakers = int(self.__speakers)
 
@@ -415,7 +411,7 @@ class WhisperAudioTranscriber:
         if not self.__diarization_pipeline:
             raise Exception("Diarization pipeline is not available.")
 
-        if not self.__result:
+        if self.__chunks is None:
             raise Exception(
                 "Transcription result is not available. Please transcribe first."
             )
@@ -436,12 +432,14 @@ class WhisperAudioTranscriber:
         )
         self.__logger.debug(f"Diarization inference took {time.monotonic() - t0:.2f}s")
 
-        aligned_segments = self.__align_speakers(self.__result["chunks"], diarization)
+        aligned_segments = self.__align_speakers(self.__chunks, diarization)
 
-        self.__logger.info(f"Diarization completed, took {time.monotonic() - t0:.2f}s")
+        self.__logger.info(
+            f"Diarization completed, took {time.monotonic() - started:.2f}s"
+        )
 
         return {
-            "full_transcription": self.__result["full_transcription"],
+            "full_transcription": self.__full_transcription,
             "segments": aligned_segments,
             "speaker_count": int(len(list(diarization.speaker_diarization.labels())))
             if diarization
@@ -455,8 +453,8 @@ class WhisperAudioTranscriber:
         aligned_segments = []
 
         for chunk in transcription_chunks:
-            chunk_start = chunk["timestamp"][0]
-            chunk_end = chunk["timestamp"][1]
+            chunk_start = chunk["start"]
+            chunk_end = chunk["end"]
             chunk_text = chunk["text"]
             avg_score = chunk.get("avg_score")
 
@@ -522,54 +520,53 @@ class WhisperAudioTranscriber:
         """
         Generate subtitles from the transcription result.
         """
-        if not self.__result or "chunks" not in self.__result:
+        if self.__chunks is None:
             raise Exception(
-                "Transcription result is not available or does not contain chunks."
+                "Transcription result is not available. Please transcribe first."
             )
 
-        # Build list of (start_ms, end_ms, start_s, end_s, caption) entries
-        entries = []
-        for chunk in self.__result["chunks"]:
-            text = chunk["text"].strip()
-            if not text:
-                continue
-            start, end = chunk["timestamp_ms"]
-            start_s, end_s = chunk["timestamp"]
-            caption = self.__caption_split(text)
-            entries.append((start, end, start_s, end_s, caption))
+        # (start, end, caption), in seconds. SRT timestamps are formatted once
+        # at the end, so there is only ever one representation of an instant.
+        entries = [
+            (chunk["start"], chunk["end"], self.__caption_split(chunk["text"].strip()))
+            for chunk in self.__chunks
+            if chunk["text"].strip()
+        ]
 
-        # Merge consecutive single-line captions into one two-line subtitle
-        # only if the gap between them is less than 1.8 seconds
+        # Merge a pair of consecutive single-line captions into one two-line
+        # subtitle, when the silence between them is short enough.
         merged = []
-        i = 0
-        while i < len(entries):
-            start, end, start_s, end_s, caption = entries[i]
+        index = 0
+
+        while index < len(entries):
+            start, end, caption = entries[index]
+            following = entries[index + 1] if index + 1 < len(entries) else None
+
             if (
-                "\n" not in caption
-                and i + 1 < len(entries)
-                and "\n" not in entries[i + 1][4]
-                and entries[i + 1][2] - end_s < 1.8
+                following is not None
+                and "\n" not in caption
+                and "\n" not in following[2]
+                and following[0] - end < settings.SUBTITLE_MERGE_GAP
             ):
-                next_start, next_end, _, _, next_caption = entries[i + 1]
-                merged.append((start, next_end, f"{caption}\n{next_caption}"))
-                i += 2
+                merged.append((start, following[1], f"{caption}\n{following[2]}"))
+                index += 2
             else:
                 merged.append((start, end, caption))
-                i += 1
+                index += 1
 
-        subtitles = ""
-        for index, (start, end, caption) in enumerate(merged):
-            subtitles += f"{index + 1}\n"
-            subtitles += f"{start} --> {end}\n"
-            subtitles += f"{caption}\n\n"
-
-        return subtitles
+        return "".join(
+            f"{number}\n"
+            f"{self.__seconds_to_srt_time(start)} --> "
+            f"{self.__seconds_to_srt_time(end)}\n"
+            f"{caption}\n\n"
+            for number, (start, end, caption) in enumerate(merged, start=1)
+        )
 
     def __caption_split(self, caption) -> str:
         """
         Split a caption into two parts if it exceeds a certain length.
         """
-        if len(caption) < 42:
+        if len(caption) < settings.SUBTITLE_LINE_LENGTH:
             return f"{caption}"
 
         current_position = len(caption) // 2

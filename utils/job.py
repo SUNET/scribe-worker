@@ -81,6 +81,10 @@ def _transcribe_worker(
     result_dict["transcribed_seconds"] = transcribed_seconds
     result_dict["srt_data"] = transcriber.subtitles()
 
+    # Word timings apply to subtitles and transcriptions alike, so they are
+    # collected regardless of the requested output format.
+    result_dict["words_data"] = transcriber.words()
+
     if output_format == "txt":
         drz = transcriber.diarization()
         result_dict["json_data"] = drz if drz else None
@@ -112,6 +116,7 @@ class TranscriptionJob:
         self.model = None
         self.speakers = 0
         self.mp4_data = None
+        self.words_data = None
         self.__temp_file = None
 
         return self
@@ -286,6 +291,7 @@ class TranscriptionJob:
 
         self.srt_data = result_dict.get("srt_data")
         self.json_data = result_dict.get("json_data")
+        self.words_data = result_dict.get("words_data")
 
         return transcribed_seconds
 
@@ -446,6 +452,18 @@ class TranscriptionJob:
                     "json", {"result": self.json_data, "format": "json"}
                 )
 
+            # Uploaded last: a backend that predates the "words" format
+            # rejects it with 400, which must not cost us the real results.
+            if self.words_data:
+                try:
+                    self.__upload_result(
+                        "words", {"result": self.words_data, "format": "words"}
+                    )
+                except Exception as e:
+                    self.logger.warning(
+                        f"Job {self.uuid}: word timings not stored ({e})"
+                    )
+
             if media_future:
                 media_future.result()
         except Exception as e:
@@ -475,6 +493,7 @@ class TranscriptionJob:
         self.wav_data = None
         self.srt_data = None
         self.json_data = None
+        self.words_data = None
         self.mp4_data = None
         self.__close_temp_file()
 
