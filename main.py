@@ -49,9 +49,27 @@ logger = get_logger()
     download,
     drain,
     drainfile,
+    role,
 ) = parse_arguments()
 
-if not zap and not download and not drain:
+# A worker does transcription unless told otherwise. Roles are a set so
+# that a development box can do both; production splits them per host,
+# since a resident language model and a Whisper model do not fit on one
+# GPU. Both spellings work and mean the same thing:
+#
+#   --role inference,transcription
+#   --role inference --role transcription
+roles = {
+    part.strip().lower()
+    for value in (role or ["transcription"])
+    for part in value.split(",")
+    if part.strip()
+}
+
+if not zap and not download and not drain and "transcription" in roles:
+    # Only when this worker actually transcribes: the import pulls in the
+    # whole Whisper and pyannote stack, which an inference-only host has no
+    # use for and, on a box with one GPU, no room for either.
     from utils.job import TranscriptionJob
 
 
@@ -152,8 +170,22 @@ def mainloop(worker_id: int, gpu_id: Optional[int] = None) -> None:
             job.start()
 
 
+def inference_mainloop() -> None:
+    """
+    Run the inference side of the worker: connect to the hub and wait.
+
+    Unlike transcription, nothing is fetched here. Inference requests are
+    never stored -- they live in the hub's memory only -- so the hub pushes
+    them down a connection this process holds open.
+    """
+
+    from utils.inference import inference_loop
+
+    inference_loop()
+
+
 def main() -> None:
-    logger.info("Starting transcription service...")
+    logger.info(f"Starting worker with roles: {', '.join(sorted(roles))}")
 
     num_gpus = torch.cuda.device_count()
     logger.info(f"Detected {num_gpus} GPU(s)")
@@ -163,13 +195,19 @@ def main() -> None:
     else:
         processes = [mp.Process(target=healthcheck)]
 
-    processes += [
-        mp.Process(
-            target=mainloop,
-            args=(i, i % num_gpus if num_gpus > 0 else None),
-        )
-        for i in range(settings.WORKERS)
-    ]
+    if "transcription" in roles:
+        processes += [
+            mp.Process(
+                target=mainloop,
+                args=(i, i % num_gpus if num_gpus > 0 else None),
+            )
+            for i in range(settings.WORKERS)
+        ]
+
+    if "inference" in roles:
+        # One process, not WORKERS of them: the model is resident in it and
+        # a second copy would not fit on the same card.
+        processes.append(mp.Process(target=inference_mainloop))
 
     for p in processes:
         p.start()
@@ -267,6 +305,14 @@ def download_models() -> None:
 
 
 if __name__ == "__main__":
+    if not roles:
+        print("No roles given. Use --role transcription, inference, or both.")
+        sys.exit(1)
+
+    if unknown := roles - {"transcription", "inference"}:
+        print(f"Unknown role(s): {', '.join(sorted(unknown))}")
+        sys.exit(1)
+
     if download:
         download_models()
     elif drain:

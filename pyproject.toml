@@ -13,4 +13,6 @@ dependencies = [
     "transformers>=5.0.0",
     "whisper-timestamped",
     "onnxruntime",
+    "accelerate>=1.0.0",
+    "websockets>=13.0",
 ]

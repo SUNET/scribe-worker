@@ -83,6 +83,23 @@ def parse_arguments() -> tuple:
         help="Path to drain file.",
     )
 
+    parser.add_argument(
+        "--role",
+        type=str,
+        action="append",
+        default=None,
+        help=(
+            "What this worker does: transcription, inference, or both. "
+            "Accepts a comma separated list and may be given more than "
+            "once -- repeating it adds a role rather than replacing the "
+            "one before it, which is what argparse would otherwise do "
+            "silently. A host running a language model resident on its GPU "
+            "has no room for a Whisper model beside it, which is why this "
+            "is a choice rather than everything at once. Defaults to "
+            "transcription."
+        ),
+    )
+
     args = parser.parse_args()
 
     return (
@@ -96,4 +113,5 @@ def parse_arguments() -> tuple:
         args.download,
         args.drain,
         args.drainfile,
+        args.role,
     )
