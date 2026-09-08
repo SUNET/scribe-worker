@@ -1,0 +1,162 @@
+{
+  "legacy": {
+    "full_transcription": "First. Second. Third. Together.",
+    "speaker_count": 2,
+    "segments": [
+      {
+        "start": 0.0,
+        "end": 4.0,
+        "duration": 4.0,
+        "text": "First. Second. Third. Together.",
+        "speaker": "Speaker_00",
+        "active_speakers": [
+          "Speaker_00",
+          "Speaker_01"
+        ],
+        "avg_score": 0.9
+      }
+    ]
+  },
+  "raw": {
+    "full_transcription": "First. Second. Third. Together.",
+    "speaker_count": 2,
+    "segments": [
+      {
+        "start": 0.0,
+        "end": 4.0,
+        "duration": 4.0,
+        "text": "First. Second. Third. Together.",
+        "speaker": "Speaker_00",
+        "active_speakers": [
+          "Speaker_00",
+          "Speaker_01"
+        ],
+        "avg_score": 0.9
+      }
+    ],
+    "diarization_segments": [
+      {
+        "start": 0.0,
+        "end": 1.0,
+        "speaker": "Speaker_00"
+      },
+      {
+        "start": 1.0,
+        "end": 2.0,
+        "speaker": "Speaker_01"
+      },
+      {
+        "start": 2.0,
+        "end": 4.0,
+        "speaker": "Speaker_00"
+      },
+      {
+        "start": 3.0,
+        "end": 4.0,
+        "speaker": "Speaker_01"
+      }
+    ]
+  },
+  "aligned": {
+    "full_transcription": "First. Second. Third. Together.",
+    "speaker_count": 2,
+    "segments": [
+      {
+        "start": 0.0,
+        "end": 1.0,
+        "text": "First.",
+        "speaker": "Speaker_00",
+        "active_speakers": [
+          "Speaker_00"
+        ],
+        "duration": 1.0,
+        "avg_score": 0.9
+      },
+      {
+        "start": 1.0,
+        "end": 2.0,
+        "text": "Second.",
+        "speaker": "Speaker_01",
+        "active_speakers": [
+          "Speaker_01"
+        ],
+        "duration": 1.0,
+        "avg_score": 0.9
+      },
+      {
+        "start": 2.0,
+        "end": 3.0,
+        "text": "Third.",
+        "speaker": "Speaker_00",
+        "active_speakers": [
+          "Speaker_00"
+        ],
+        "duration": 1.0,
+        "avg_score": 0.9
+      },
+      {
+        "start": 3.0,
+        "end": 4.0,
+        "text": "Together.",
+        "speaker": "Unknown",
+        "active_speakers": [
+          "Speaker_00",
+          "Speaker_01"
+        ],
+        "duration": 1.0,
+        "avg_score": 0.9
+      }
+    ],
+    "diarization_segments": [
+      {
+        "start": 0.0,
+        "end": 1.0,
+        "speaker": "Speaker_00"
+      },
+      {
+        "start": 1.0,
+        "end": 2.0,
+        "speaker": "Speaker_01"
+      },
+      {
+        "start": 2.0,
+        "end": 4.0,
+        "speaker": "Speaker_00"
+      },
+      {
+        "start": 3.0,
+        "end": 4.0,
+        "speaker": "Speaker_01"
+      }
+    ]
+  },
+  "words": {
+    "version": 1,
+    "words": [
+      {
+        "t": "First.",
+        "s": 0.1,
+        "e": 0.9,
+        "c": 0.9
+      },
+      {
+        "t": "Second.",
+        "s": 1.1,
+        "e": 1.9,
+        "c": 0.9
+      },
+      {
+        "t": "Third.",
+        "s": 2.1,
+        "e": 2.9,
+        "c": 0.9
+      },
+      {
+        "t": "Together.",
+        "s": 3.1,
+        "e": 3.9,
+        "c": 0.9
+      }
+    ]
+  }
+}
