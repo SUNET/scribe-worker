@@ -40,8 +40,7 @@ remain overlapping. Intervals without transcribed words are retained, and
 times are not rounded or adjusted to match transcript segments. Speaker
 identifiers use the same naming convention as the transcript.
 
-The existing `segments`, `full_transcription`, and `speaker_count` fields
-are unchanged. This field is included in the existing JSON result upload;
+This field is included in the existing JSON result upload;
 it does not introduce an endpoint, another inference pass, or a new result
 format. It is not added to SRT or the separate word-timing payload.
 
@@ -50,8 +49,41 @@ the result predates this addition or was rewritten by a consumer that does
 not preserve it. Consumers should read it from the original worker result;
 it is model output, not a representation of subsequent transcript edits.
 
-Run the model-free serialization tests with
+Run the tests without model downloads or inference with
 `python -m unittest discover -s tests`.
+
+## Speaker alignment
+
+For diarized JSON results, the worker uses word timings to split transcription
+chunks when the assigned speaker changes. It partitions the original pyannote
+intervals into spans with a constant set of simultaneous speakers, then assigns
+each word to the state with the greatest temporal overlap. Consecutive words
+with the same state remain together, within the existing chunk boundaries.
+
+`speaker` is the sole speaker when the assigned state contains one speaker.
+For overlapping speech it is `Unknown`, and `active_speakers` lists the
+simultaneous speakers. Equal-duration ties and words mostly in silence are
+also `Unknown`, with an empty active-speaker list. Consecutive speakers are
+never listed together as though they spoke simultaneously.
+
+Splitting requires complete agreement between word text and chunk text,
+ignoring whitespace, and usable word timestamps. Otherwise the original
+text is retained as one chunk: a single consistent speech state can label
+it, but ambiguous chunks are marked `Unknown`. Punctuation is preserved.
+There is no fabricated timing for missing words and no default to Speaker_00.
+
+Word timing and diarization remain model estimates. A word crossing a speaker
+boundary is indivisible and is assigned by overlap; this cannot guarantee its
+true speaker or separate the words of simultaneous speakers. The unchanged
+`diarization_segments` field retains the original boundaries for downstream
+analysis, including activity with no transcribed words.
+
+Full transcription text, the separate word payload, and SRT generation are
+unchanged. JSON transcript segment boundaries, counts, confidence averages,
+and speaker labels can change. Existing saved results are not reprocessed.
+The current UI can display `Unknown`, but does not display `active_speakers`
+and may merge adjacent captions with the same primary speaker on import.
+Showing overlapping-speaker identities in that editor is a separate change.
 
 ## Features
 
