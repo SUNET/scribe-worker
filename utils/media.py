@@ -32,6 +32,7 @@ def _run_cmd_pipe(command: list[str]) -> bytes:
 def has_video_stream(input_path: str) -> bool:
     """
     Check if the input file contains a video stream using ffprobe.
+    Attached pictures (e.g. album art in MP3s) are not counted as video.
     """
     ffprobe_path = (
         os.path.join(os.path.dirname(settings.FFMPEG_PATH), "ffprobe")
@@ -46,9 +47,9 @@ def has_video_stream(input_path: str) -> bool:
                 "-v",
                 "error",
                 "-select_streams",
-                "v:0",
+                "v",
                 "-show_entries",
-                "stream=codec_type",
+                "stream_disposition=attached_pic",
                 "-of",
                 "csv=p=0",
                 input_path,
@@ -56,7 +57,11 @@ def has_video_stream(input_path: str) -> bool:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        return result.returncode == 0 and b"video" in result.stdout
+        if result.returncode != 0:
+            return False
+        return any(
+            line.strip() == b"0" for line in result.stdout.splitlines()
+        )
     except Exception:
         return False
 
@@ -121,6 +126,7 @@ def downsample_audio(input_path: str) -> bytes:
             "0",
             "-i",
             input_path,
+            "-vn",
             "-c:a",
             "aac",
             "-b:a",
@@ -162,6 +168,7 @@ def transcode_to_wav(input_path: str) -> bytes:
         "0",
         "-i",
         input_path,
+        "-vn",
         "-ar",
         "16000",
         "-ac",
