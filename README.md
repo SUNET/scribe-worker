@@ -21,6 +21,38 @@ information for third-party components.
 
 Contributions are welcome! Please feel free to open issues or submit pull requests.
 
+## Raw speaker intervals in JSON results
+
+New diarized JSON results include an additive `diarization_segments` field:
+
+```json
+{
+  "diarization_segments": [
+    {"start": 0.123456789, "end": 2.5, "speaker": "Speaker_00"},
+    {"start": 1.7, "end": 3.0, "speaker": "Speaker_01"}
+  ]
+}
+```
+
+These are the original `speaker_diarization` intervals from pyannote, in
+seconds relative to the beginning of the recording. Overlapping intervals
+remain overlapping. Intervals without transcribed words are retained, and
+times are not rounded or adjusted to match transcript segments. Speaker
+identifiers use the same naming convention as the transcript.
+
+The existing `segments`, `full_transcription`, and `speaker_count` fields
+are unchanged. This field is included in the existing JSON result upload;
+it does not introduce an endpoint, another inference pass, or a new result
+format. It is not added to SRT or the separate word-timing payload.
+
+An empty list means diarization returned no intervals. A missing field means
+the result predates this addition or was rewritten by a consumer that does
+not preserve it. Consumers should read it from the original worker result;
+it is model output, not a representation of subsequent transcript edits.
+
+Run the model-free serialization tests with
+`python -m unittest discover -s tests`.
+
 ## Features
 
 - **Transcription Processing**: Processes audio/video transcription jobs from the backend queue
@@ -97,4 +129,3 @@ scribe-worker/
 ├── models/              # Whisper model files
 └── downloaded/          # Downloaded files for processing
 ```
-

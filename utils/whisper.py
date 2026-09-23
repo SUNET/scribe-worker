@@ -31,6 +31,7 @@ from pyannote.audio.telemetry import set_telemetry_metrics
 from typing import Optional
 from utils.log import get_logger
 from utils.settings import get_settings
+from utils.diarization import serialize_diarization
 from utils.words import (
     average_confidence,
     build_payload,
@@ -441,6 +442,9 @@ class WhisperAudioTranscriber:
         return {
             "full_transcription": self.__full_transcription,
             "segments": aligned_segments,
+            "diarization_segments": serialize_diarization(
+                diarization.speaker_diarization
+            ),
             "speaker_count": int(len(list(diarization.speaker_diarization.labels())))
             if diarization
             else 0,
