@@ -31,6 +31,8 @@ from pyannote.audio.telemetry import set_telemetry_metrics
 from typing import Optional
 from utils.log import get_logger
 from utils.settings import get_settings
+from utils.diarization import serialize_diarization
+from utils.speaker_alignment import align_chunks
 from utils.words import (
     average_confidence,
     build_payload,
@@ -256,6 +258,7 @@ class WhisperAudioTranscriber:
 
             if len(text) > settings.SEGMENT_SPLIT_LENGTH:
                 first_part, second_part = self.__split_text(text)
+                word_split = split_index_for_text(words, first_part)
                 mid_time = self.__segment_split_time(
                     start_time, end_time, words, first_part
                 )
@@ -265,6 +268,7 @@ class WhisperAudioTranscriber:
                         "start": start_time,
                         "end": mid_time,
                         "text": first_part,
+                        "words": words[:word_split] if word_split else [],
                         "avg_score": avg_score,
                     }
                 )
@@ -274,6 +278,7 @@ class WhisperAudioTranscriber:
                         "start": mid_time,
                         "end": end_time,
                         "text": second_part,
+                        "words": words[word_split:] if word_split else [],
                         "avg_score": avg_score,
                     }
                 )
@@ -285,6 +290,7 @@ class WhisperAudioTranscriber:
                     "start": start_time,
                     "end": end_time,
                     "text": text,
+                    "words": words,
                     "avg_score": avg_score,
                 }
             )
@@ -432,7 +438,8 @@ class WhisperAudioTranscriber:
         )
         self.__logger.debug(f"Diarization inference took {time.monotonic() - t0:.2f}s")
 
-        aligned_segments = self.__align_speakers(self.__chunks, diarization)
+        diarization_segments = serialize_diarization(diarization.speaker_diarization)
+        aligned_segments = align_chunks(self.__chunks, diarization_segments)
 
         self.__logger.info(
             f"Diarization completed, took {time.monotonic() - started:.2f}s"
@@ -441,80 +448,11 @@ class WhisperAudioTranscriber:
         return {
             "full_transcription": self.__full_transcription,
             "segments": aligned_segments,
+            "diarization_segments": diarization_segments,
             "speaker_count": int(len(list(diarization.speaker_diarization.labels())))
             if diarization
             else 0,
         }
-
-    def __align_speakers(self, transcription_chunks, diarization) -> list:
-        """
-        Align transcription chunks with speaker diarization results.
-        """
-        aligned_segments = []
-
-        for chunk in transcription_chunks:
-            chunk_start = chunk["start"]
-            chunk_end = chunk["end"]
-            chunk_text = chunk["text"]
-            avg_score = chunk.get("avg_score")
-
-            chunk_middle = (chunk_start + chunk_end) / 2
-            dominant_speaker = self.__get_speaker(diarization, chunk_middle)
-            active_speakers = self.__get_speakers_in_range(
-                diarization, chunk_start, chunk_end
-            )
-
-            segment = {
-                "start": float(chunk_start),
-                "end": float(chunk_end),
-                "text": chunk_text.strip(),
-                "speaker": dominant_speaker,
-                "active_speakers": active_speakers,
-                "duration": float(chunk_end - chunk_start),
-            }
-
-            if avg_score is not None:
-                segment["avg_score"] = avg_score
-
-            aligned_segments.append(segment)
-
-        return aligned_segments
-
-    def __normalize_speaker_name(self, speaker: str) -> str:
-        """
-        Normalize speaker names to a consistent format (Speaker_00, Speaker_01, etc).
-        """
-        if speaker.startswith("SPEAKER_"):
-            num = speaker.replace("SPEAKER_", "")
-            return f"Speaker_{num}"
-        return speaker
-
-    def __get_speaker(self, diarization, time_point) -> str:
-        """
-        Get the speaker label for a specific time point in the diarization.
-        """
-        for segment, _, speaker in diarization.speaker_diarization.itertracks(
-            yield_label=True
-        ):
-            if segment.start <= time_point <= segment.end:
-                return self.__normalize_speaker_name(speaker)
-
-        return "Speaker_00"
-
-    def __get_speakers_in_range(self, diarization, start_time, end_time) -> list:
-        """
-        Get a list of active speakers within a specific time range in the
-        diarization.
-        """
-        active_speakers = set()
-
-        for segment, _, speaker in diarization.speaker_diarization.itertracks(
-            yield_label=True
-        ):
-            if not (segment.end < start_time or segment.start > end_time):
-                active_speakers.add(self.__normalize_speaker_name(speaker))
-
-        return list(active_speakers)
 
     def subtitles(self) -> str:
         """
