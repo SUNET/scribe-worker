@@ -28,6 +28,7 @@ import whisper_timestamped as whisper
 from huggingface_hub import snapshot_download
 from pyannote.audio import Pipeline
 from pyannote.audio.telemetry import set_telemetry_metrics
+from transformers import AutoModelForAudioFrameClassification, AutoProcessor
 from typing import Optional
 from utils.log import get_logger
 from utils.settings import get_settings
@@ -64,12 +65,68 @@ def get_torch_device() -> tuple:
         return "cpu", torch.float32
 
 
-def diarization_init(hf_token: str) -> Optional[Pipeline]:
+class NemotronDiarizer:
     """
-    Initializes the diarization pipeline using HuggingFace's PyAnnote.
-    Uses the community version for better performance.
+    Speaker diarization with nvidia/Nemotron-3-Diarization through
+    transformers, in offline mode: the model splits the whole recording into
+    chunks itself, so arbitrarily long audio goes through a single forward.
+    """
+
+    MODEL_ID = "nvidia/Nemotron-3-Diarization"
+
+    def __init__(self, threshold: float = 0.5) -> None:
+        device, _ = get_torch_device()
+        # The model card benchmarks in bf16 on CUDA; elsewhere stay in fp32.
+        dtype = torch.bfloat16 if device.startswith("cuda") else torch.float32
+
+        self.threshold = threshold
+        self.processor = AutoProcessor.from_pretrained(self.MODEL_ID)
+        self.model = AutoModelForAudioFrameClassification.from_pretrained(
+            self.MODEL_ID, dtype=dtype
+        ).to(device)
+        self.model.eval()
+
+    def __call__(self, audio: np.ndarray, sample_rate: int) -> list:
+        """
+        Diarize 16 kHz mono float audio.
+        Returns a list of (start, end, speaker_label) tuples.
+        """
+        expected_rate = self.processor.feature_extractor.sampling_rate
+        if sample_rate != expected_rate:
+            raise ValueError(
+                f"Nemotron diarization needs {expected_rate} Hz audio, got {sample_rate} Hz"
+            )
+
+        inputs = self.processor(audio, sampling_rate=sample_rate).to(
+            self.model.device, dtype=self.model.dtype
+        )
+
+        with torch.inference_mode():
+            logits = self.model(**inputs).logits
+
+        segments = self.processor.extract_speaker_dict(
+            logits.float(), inputs.attention_mask, threshold=self.threshold
+        )[0]
+
+        return [
+            (s["Start"], s["End"], f"Speaker_{s['Speaker']:02d}") for s in segments
+        ]
+
+
+def diarization_init(hf_token: str):
+    """
+    Initializes the diarization backend selected by DIARIZATION_BACKEND,
+    either PyAnnote's community pipeline or NVIDIA's Nemotron-3-Diarization.
     Returns pipeline.
     """
+    if settings.DIARIZATION_BACKEND == "nemotron":
+        return NemotronDiarizer(threshold=settings.NEMOTRON_DIARIZATION_THRESHOLD)
+
+    if settings.DIARIZATION_BACKEND != "pyannote":
+        raise ValueError(
+            f"Unknown DIARIZATION_BACKEND '{settings.DIARIZATION_BACKEND}'"
+        )
+
     device, _ = get_torch_device()
 
     pipeline = Pipeline.from_pretrained(
@@ -418,21 +475,34 @@ class WhisperAudioTranscriber:
 
         if self.__audio_data:
             audio_array, sample_rate = self.__get_decoded_audio()
-            waveform = torch.from_numpy(audio_array).unsqueeze(0)
-            audio_input = {"waveform": waveform, "sample_rate": sample_rate}
         else:
-            audio_input = self.__audio_path
+            # whisper.load_audio resamples to 16 kHz mono, as both backends want
+            audio_array, sample_rate = whisper.load_audio(self.__audio_path), 16000
 
         t0 = time.monotonic()
-        diarization = self.__diarization_pipeline(
-            audio_input,
-            num_speakers=int(self.__speakers),
-            min_speakers=min_speakers,
-            max_speakers=max_speakers,
-        )
+        if isinstance(self.__diarization_pipeline, NemotronDiarizer):
+            if speakers:
+                self.__logger.info(
+                    "Nemotron diarization ignores the requested speaker count"
+                )
+            speaker_segments = self.__diarization_pipeline(audio_array, sample_rate)
+        else:
+            waveform = torch.from_numpy(audio_array).unsqueeze(0)
+            diarization = self.__diarization_pipeline(
+                {"waveform": waveform, "sample_rate": sample_rate},
+                num_speakers=int(self.__speakers),
+                min_speakers=min_speakers,
+                max_speakers=max_speakers,
+            )
+            speaker_segments = [
+                (segment.start, segment.end, self.__normalize_speaker_name(speaker))
+                for segment, _, speaker in diarization.speaker_diarization.itertracks(
+                    yield_label=True
+                )
+            ]
         self.__logger.debug(f"Diarization inference took {time.monotonic() - t0:.2f}s")
 
-        aligned_segments = self.__align_speakers(self.__chunks, diarization)
+        aligned_segments = self.__align_speakers(self.__chunks, speaker_segments)
 
         self.__logger.info(
             f"Diarization completed, took {time.monotonic() - started:.2f}s"
@@ -441,14 +511,13 @@ class WhisperAudioTranscriber:
         return {
             "full_transcription": self.__full_transcription,
             "segments": aligned_segments,
-            "speaker_count": int(len(list(diarization.speaker_diarization.labels())))
-            if diarization
-            else 0,
+            "speaker_count": len({speaker for _, _, speaker in speaker_segments}),
         }
 
-    def __align_speakers(self, transcription_chunks, diarization) -> list:
+    def __align_speakers(self, transcription_chunks, speaker_segments) -> list:
         """
-        Align transcription chunks with speaker diarization results.
+        Align transcription chunks with speaker diarization results, given as
+        (start, end, speaker) tuples.
         """
         aligned_segments = []
 
@@ -459,9 +528,9 @@ class WhisperAudioTranscriber:
             avg_score = chunk.get("avg_score")
 
             chunk_middle = (chunk_start + chunk_end) / 2
-            dominant_speaker = self.__get_speaker(diarization, chunk_middle)
+            dominant_speaker = self.__get_speaker(speaker_segments, chunk_middle)
             active_speakers = self.__get_speakers_in_range(
-                diarization, chunk_start, chunk_end
+                speaker_segments, chunk_start, chunk_end
             )
 
             segment = {
@@ -489,30 +558,26 @@ class WhisperAudioTranscriber:
             return f"Speaker_{num}"
         return speaker
 
-    def __get_speaker(self, diarization, time_point) -> str:
+    def __get_speaker(self, speaker_segments, time_point) -> str:
         """
         Get the speaker label for a specific time point in the diarization.
         """
-        for segment, _, speaker in diarization.speaker_diarization.itertracks(
-            yield_label=True
-        ):
-            if segment.start <= time_point <= segment.end:
-                return self.__normalize_speaker_name(speaker)
+        for start, end, speaker in speaker_segments:
+            if start <= time_point <= end:
+                return speaker
 
         return "Speaker_00"
 
-    def __get_speakers_in_range(self, diarization, start_time, end_time) -> list:
+    def __get_speakers_in_range(self, speaker_segments, start_time, end_time) -> list:
         """
         Get a list of active speakers within a specific time range in the
         diarization.
         """
         active_speakers = set()
 
-        for segment, _, speaker in diarization.speaker_diarization.itertracks(
-            yield_label=True
-        ):
-            if not (segment.end < start_time or segment.start > end_time):
-                active_speakers.add(self.__normalize_speaker_name(speaker))
+        for start, end, speaker in speaker_segments:
+            if not (end < start_time or start > end_time):
+                active_speakers.add(speaker)
 
         return list(active_speakers)
 

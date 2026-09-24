@@ -10,7 +10,13 @@ dependencies = [
     "openai-whisper",
     "pyannote-audio>=4.0.3",
     "pydantic-settings>=2.12.0",
-    "transformers>=5.0.0",
+    "transformers",
     "whisper-timestamped",
     "onnxruntime",
+    "librosa>=0.11.0",
 ]
+
+[tool.uv.sources]
+# Nemotron3Diarization is on transformers main but not yet in a release.
+# Switch back to a plain version bound once it ships.
+transformers = { git = "https://github.com/huggingface/transformers", rev = "c8b81b63232be35ab1774dd3cabbf499d8b9808f" }

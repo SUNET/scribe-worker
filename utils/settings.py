@@ -46,6 +46,14 @@ class Settings(BaseSettings):
 
     HF_TOKEN: str = ""
 
+    # Speaker diarization backend: "pyannote" (speaker-diarization-community-1)
+    # or "nemotron" (nvidia/Nemotron-3-Diarization). Nemotron handles at most
+    # 8 speakers and ignores the requested speaker count.
+    DIARIZATION_BACKEND: str = "pyannote"
+
+    # Nemotron only: speaker probability above which a frame counts as speech.
+    NEMOTRON_DIARIZATION_THRESHOLD: float = 0.5
+
     # Ask whisper-timestamped for a per-word confidence score. Word level
     # timestamps are produced either way; this only controls the score, which
     # costs an extra pass over the decoded tokens. Turn off to trade the
