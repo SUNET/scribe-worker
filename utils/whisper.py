@@ -315,7 +315,7 @@ class WhisperAudioTranscriber:
                 compute_word_confidence=settings.WORD_CONFIDENCE,
                 refine_whisper_precision=0,
                 trust_whisper_timestamps=True,
-                verbose=False,
+                verbose=None,
                 beam_size=3,
                 best_of=3,
             )
@@ -335,7 +335,7 @@ class WhisperAudioTranscriber:
                 compute_word_confidence=settings.WORD_CONFIDENCE,
                 refine_whisper_precision=0,
                 trust_whisper_timestamps=True,
-                verbose=False,
+                verbose=None,
             )
         elapsed = time.monotonic() - t0
         audio_duration = len(audio) / 16000
