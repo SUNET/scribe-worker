@@ -142,7 +142,6 @@ class TranscriptionJob:
         self.user_id = job.get("user_id")
         self.language = job.get("language")
         self.model_type = job.get("model_type")
-        self.model = self.__get_model()
         self.speakers = job.get("speakers", 0)
         self.output_format = job.get("output_format", "txt")
 
@@ -151,6 +150,18 @@ class TranscriptionJob:
 
         if not self.speakers:
             self.speakers = 0
+
+        try:
+            self.model = self.__get_model()
+        except (KeyError, AttributeError):
+            error = f"Unsupported language or model type: {self.language!r}, {self.model_type!r}"
+            self.logger.error(f"Job {self.uuid}: {error}")
+            self.__put_status(
+                JobStatusEnum.FAILED,
+                error=error,
+                transcribed_seconds=None,
+            )
+            return False
 
         self.logger.info(
             f"Job {self.uuid}: language={self.language}, model={self.model}, "
