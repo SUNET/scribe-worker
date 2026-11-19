@@ -31,6 +31,11 @@ from pyannote.audio.telemetry import set_telemetry_metrics
 from typing import Optional
 from utils.log import get_logger
 from utils.settings import get_settings
+from utils.speakers import (
+    SpeakerTimeline,
+    align_chunks,
+    turns_from_annotation,
+)
 from utils.words import (
     average_confidence,
     build_payload,
@@ -260,12 +265,18 @@ class WhisperAudioTranscriber:
                     start_time, end_time, words, first_part
                 )
 
+                # Words follow the time cut, so each half keeps its own timings
+                # for speaker alignment.
+                first_words = [w for w in words if w["s"] < mid_time]
+                second_words = [w for w in words if w["s"] >= mid_time]
+
                 chunks.append(
                     {
                         "start": start_time,
                         "end": mid_time,
                         "text": first_part,
                         "avg_score": avg_score,
+                        "words": first_words,
                     }
                 )
 
@@ -275,6 +286,7 @@ class WhisperAudioTranscriber:
                         "end": end_time,
                         "text": second_part,
                         "avg_score": avg_score,
+                        "words": second_words,
                     }
                 )
 
@@ -286,6 +298,7 @@ class WhisperAudioTranscriber:
                     "end": end_time,
                     "text": text,
                     "avg_score": avg_score,
+                    "words": words,
                 }
             )
 
@@ -393,17 +406,9 @@ class WhisperAudioTranscriber:
 
         speakers = int(self.__speakers)
 
-        match speakers:
-            case 0:
-                min_speakers = None
-                max_speakers = None
-                speakers = None
-            case 1:
-                min_speakers = 1
-                max_speakers = 2
-            case _:
-                min_speakers = speakers - 1
-                max_speakers = speakers + 1
+        # pyannote lets an exact num_speakers override min/max, so passing
+        # both only ever applied the exact count. 0 means "detect".
+        num_speakers = speakers if speakers > 0 else None
 
         if not self.__diarization_pipeline:
             self.__diarization_pipeline = diarization_init(self.__hf_token)
@@ -426,13 +431,22 @@ class WhisperAudioTranscriber:
         t0 = time.monotonic()
         diarization = self.__diarization_pipeline(
             audio_input,
-            num_speakers=int(self.__speakers),
-            min_speakers=min_speakers,
-            max_speakers=max_speakers,
+            num_speakers=num_speakers,
         )
         self.__logger.debug(f"Diarization inference took {time.monotonic() - t0:.2f}s")
 
-        aligned_segments = self.__align_speakers(self.__chunks, diarization)
+        # The exclusive annotation has no overlapping speech, which is what
+        # aligning with transcript timestamps needs; the regular one is kept
+        # to report everyone active in a segment.
+        overlapping = turns_from_annotation(diarization.speaker_diarization)
+        exclusive = getattr(diarization, "exclusive_speaker_diarization", None)
+        dominant = turns_from_annotation(exclusive) if exclusive else overlapping
+
+        aligned_segments = align_chunks(
+            self.__chunks,
+            SpeakerTimeline(dominant),
+            SpeakerTimeline(overlapping),
+        )
 
         self.__logger.info(
             f"Diarization completed, took {time.monotonic() - started:.2f}s"
@@ -445,76 +459,6 @@ class WhisperAudioTranscriber:
             if diarization
             else 0,
         }
-
-    def __align_speakers(self, transcription_chunks, diarization) -> list:
-        """
-        Align transcription chunks with speaker diarization results.
-        """
-        aligned_segments = []
-
-        for chunk in transcription_chunks:
-            chunk_start = chunk["start"]
-            chunk_end = chunk["end"]
-            chunk_text = chunk["text"]
-            avg_score = chunk.get("avg_score")
-
-            chunk_middle = (chunk_start + chunk_end) / 2
-            dominant_speaker = self.__get_speaker(diarization, chunk_middle)
-            active_speakers = self.__get_speakers_in_range(
-                diarization, chunk_start, chunk_end
-            )
-
-            segment = {
-                "start": float(chunk_start),
-                "end": float(chunk_end),
-                "text": chunk_text.strip(),
-                "speaker": dominant_speaker,
-                "active_speakers": active_speakers,
-                "duration": float(chunk_end - chunk_start),
-            }
-
-            if avg_score is not None:
-                segment["avg_score"] = avg_score
-
-            aligned_segments.append(segment)
-
-        return aligned_segments
-
-    def __normalize_speaker_name(self, speaker: str) -> str:
-        """
-        Normalize speaker names to a consistent format (Speaker_00, Speaker_01, etc).
-        """
-        if speaker.startswith("SPEAKER_"):
-            num = speaker.replace("SPEAKER_", "")
-            return f"Speaker_{num}"
-        return speaker
-
-    def __get_speaker(self, diarization, time_point) -> str:
-        """
-        Get the speaker label for a specific time point in the diarization.
-        """
-        for segment, _, speaker in diarization.speaker_diarization.itertracks(
-            yield_label=True
-        ):
-            if segment.start <= time_point <= segment.end:
-                return self.__normalize_speaker_name(speaker)
-
-        return "Speaker_00"
-
-    def __get_speakers_in_range(self, diarization, start_time, end_time) -> list:
-        """
-        Get a list of active speakers within a specific time range in the
-        diarization.
-        """
-        active_speakers = set()
-
-        for segment, _, speaker in diarization.speaker_diarization.itertracks(
-            yield_label=True
-        ):
-            if not (segment.end < start_time or segment.start > end_time):
-                active_speakers.add(self.__normalize_speaker_name(speaker))
-
-        return list(active_speakers)
 
     def subtitles(self) -> str:
         """
