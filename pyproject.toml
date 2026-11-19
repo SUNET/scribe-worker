@@ -3,12 +3,12 @@ name = "transcribe-worker"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
     "daemonize>=2.5.0",
     "gpustat>=1.1.1",
     "openai-whisper",
-    "pyannote-audio>=4.0.3",
+    "nemo-toolkit[asr]",
     "pydantic-settings>=2.12.0",
     "transformers>=5.0.0",
     "whisper-timestamped",

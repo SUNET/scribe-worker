@@ -6,7 +6,8 @@ RUN apt-get update && \
 		ca-certificates \
 		curl \
 		ffmpeg \
-		git && \
+		git \
+		libsndfile1 && \
 	rm -rf /var/lib/apt/lists/*
 
 # Install uv
