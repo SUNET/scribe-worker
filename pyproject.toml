@@ -10,6 +10,8 @@ dependencies = [
     "openai-whisper",
     "nemo-toolkit[asr]",
     "pydantic-settings>=2.12.0",
+    "torch==2.8.*",
+    "torchaudio==2.8.*",
     "transformers>=5.0.0",
     "whisper-timestamped",
     "onnxruntime",
