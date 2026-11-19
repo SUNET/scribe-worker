@@ -14,3 +14,8 @@ dependencies = [
     "whisper-timestamped",
     "onnxruntime",
 ]
+
+[tool.uv.sources]
+# Nemotron 3 Diarization needs 'rope' attention, which is newer than the
+# nemo-toolkit 3.0.0 release on PyPI.
+nemo-toolkit = { git = "https://github.com/NVIDIA-NeMo/Speech", rev = "d130e221e307370f84b69526f4cc5396b3d0792f" }
