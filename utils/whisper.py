@@ -19,14 +19,19 @@ import io
 import logging
 import numpy as np
 import os
+
+# Telemetry stays off. This must be set before huggingface_hub (pulled in by
+# the imports below) is first imported.
+os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+
 import time
 import torch
 import wave
 import whisper_timestamped as whisper
 
 from huggingface_hub import snapshot_download
-from nemo.collections.asr.models import SortformerEncLabelModel
 from typing import Optional
+from utils.diarization import Diarizer, count_speakers
 from utils.log import get_logger
 from utils.settings import get_settings
 from utils.words import (
@@ -39,9 +44,7 @@ from utils.words import (
 logger = get_logger()
 settings = get_settings()
 
-DIARIZATION_MODEL = "nvidia/Nemotron-3-Diarization"
-
-# Sample rate the diarization model expects (the worker decodes to 16 kHz mono).
+# Sample rate for audio passed by path (the worker decodes to 16 kHz mono).
 DIARIZATION_SAMPLE_RATE = 16000
 
 if settings.HF_TOKEN:
@@ -59,51 +62,6 @@ def get_torch_device() -> tuple:
         return "mps", torch.float16
     else:
         return "cpu", torch.float32
-
-
-def diarization_init() -> SortformerEncLabelModel:
-    """
-    Load NVIDIA Nemotron 3 Diarization (a Sortformer model, up to 8 speakers).
-    Uses the offline-style streaming configuration (30.4 s input buffer)
-    recommended on the model card.
-    """
-    device = "cuda:0" if torch.cuda.is_available() else "cpu"
-
-    model = SortformerEncLabelModel.from_pretrained(
-        DIARIZATION_MODEL, map_location=device
-    )
-    model.eval()
-
-    model.sortformer_modules.chunk_len = 340
-    model.sortformer_modules.chunk_right_context = 40
-    model.sortformer_modules.fifo_len = 40
-    model.sortformer_modules.spkcache_update_period = 300
-    model._check_streaming_parameters()
-
-    return model
-
-
-def parse_diarization_segments(raw_segments) -> list:
-    """
-    Convert the model output into a list of (start, end, speaker) tuples.
-    NeMo returns "begin end speaker_N" strings; tuples/lists are accepted too.
-    Speakers are named Speaker_00, Speaker_01, ... in order of first arrival.
-    """
-    segments = []
-
-    for raw in raw_segments:
-        if isinstance(raw, str):
-            start, end, speaker = raw.split()[:3]
-        else:
-            start, end, speaker = raw[:3]
-
-        if isinstance(speaker, str):
-            digits = "".join(c for c in speaker if c.isdigit())
-            speaker = int(digits) if digits else 0
-
-        segments.append((float(start), float(end), f"Speaker_{int(speaker):02d}"))
-
-    return segments
 
 
 def load_whisper_model(model_name: str, logger: logging.Logger) -> object:
@@ -147,13 +105,10 @@ class WhisperAudioTranscriber:
         model_name: Optional[str] = "base",
         language: Optional[str] = "sv",
         speakers: Optional[int] = 0,
-        hf_token: Optional[str] = None,
-        diarization_object: Optional[SortformerEncLabelModel] = None,
         audio_data: Optional[bytes] = None,
     ) -> None:
         self.__audio_path = audio_path
         self.__audio_data = audio_data
-        self.__hf_token = hf_token
         self.__device, _ = get_torch_device()
 
         if "Northern Sámi" in language:
@@ -164,7 +119,7 @@ class WhisperAudioTranscriber:
         )
         self.__logger = logger
         self.__speakers = speakers
-        self.__diarization_pipeline = diarization_object
+        self.__diarizer = Diarizer(self.__device, logger)
         self.__model = load_whisper_model(model_name, logger)
         self.__decoded_audio = None
         self.__words = []
@@ -412,20 +367,13 @@ class WhisperAudioTranscriber:
     def diarization(self) -> dict:
         """
         Perform speaker diarization on the transcribed audio.
-
-        The number of speakers is detected by the model (at most 8); the
-        requested speaker count is not used.
         """
 
-        self.__logger.info("Starting diarization")
+        speakers = int(self.__speakers)
+
+        self.__logger.info(f"Starting diarization with speakers={speakers}")
 
         started = time.monotonic()
-
-        if not self.__diarization_pipeline:
-            self.__diarization_pipeline = diarization_init()
-
-        if not self.__diarization_pipeline:
-            raise Exception("Diarization pipeline is not available.")
 
         if self.__chunks is None:
             raise Exception(
@@ -433,20 +381,11 @@ class WhisperAudioTranscriber:
             )
 
         if self.__audio_data:
-            audio_array, sample_rate = self.__get_decoded_audio()
-            audio_input = [audio_array]
+            audio, sample_rate = self.__get_decoded_audio()
         else:
-            audio_input = [self.__audio_path]
-            sample_rate = DIARIZATION_SAMPLE_RATE
+            audio, sample_rate = self.__audio_path, DIARIZATION_SAMPLE_RATE
 
-        t0 = time.monotonic()
-        with torch.inference_mode():
-            predicted = self.__diarization_pipeline.diarize(
-                audio=audio_input, batch_size=1, sample_rate=sample_rate
-            )
-        self.__logger.debug(f"Diarization inference took {time.monotonic() - t0:.2f}s")
-
-        diarization = parse_diarization_segments(predicted[0])
+        diarization = self.__diarizer.diarize(audio, sample_rate, speakers)
 
         aligned_segments = self.__align_speakers(self.__chunks, diarization)
 
@@ -457,7 +396,7 @@ class WhisperAudioTranscriber:
         return {
             "full_transcription": self.__full_transcription,
             "segments": aligned_segments,
-            "speaker_count": len({speaker for _, _, speaker in diarization}),
+            "speaker_count": count_speakers(diarization),
         }
 
     def __align_speakers(self, transcription_chunks, diarization) -> list:

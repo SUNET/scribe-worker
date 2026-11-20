@@ -57,7 +57,7 @@ class JobStatusEnum(str, Enum):
 
 
 def _transcribe_worker(
-    wav_data, model, language, speakers, hf_token, output_format, result_dict
+    wav_data, model, language, speakers, output_format, result_dict
 ):
     """
     Run transcription in a child process so all memory (RAM + VRAM)
@@ -69,7 +69,6 @@ def _transcribe_worker(
         model_name=model,
         language=language,
         speakers=speakers,
-        hf_token=hf_token,
     )
 
     transcribed_seconds = transcriber.transcribe()
@@ -97,12 +96,10 @@ class TranscriptionJob:
         self,
         logger: logging.Logger,
         api_url: str,
-        hf_token: Optional[str] = None,
         active_jobs: Optional[dict] = None,
     ):
         self.logger = logger
         self.api_url = api_url
-        self.hf_token = hf_token
         self._active_jobs = active_jobs
 
     def __enter__(self) -> "TranscriptionJob":
@@ -280,7 +277,6 @@ class TranscriptionJob:
                 self.model,
                 self.language,
                 self.speakers,
-                self.hf_token,
                 self.output_format,
                 result_dict,
             ),

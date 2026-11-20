@@ -147,7 +147,6 @@ def mainloop(worker_id: int, gpu_id: Optional[int] = None) -> None:
         with TranscriptionJob(
             logger,
             api_url,
-            hf_token=settings.HF_TOKEN,
         ) as job:
             job.start()
 
