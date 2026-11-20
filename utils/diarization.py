@@ -281,19 +281,24 @@ def _snap_to_sentence_majority(words: list, speakers: list) -> None:
     """
     Give a sentence to the one speaker who says most of it, when somebody
     else has been credited with only its first, last or any other one or two
-    words. For example "Vad | skulle det kunna vara?" at a change of speaker,
+    words. The first one or two words go to the speaker who says the rest even
+    if that is a single word ("80-120. | 80-120 ungefär."), since a change of
+    speaker belongs between sentences; the others need the main speaker to
+    have at least MIN_MAIN_WORDS of it. For example "Vad | skulle det kunna vara?" at a change of speaker,
     "oavsett skolans | form?", a lone "Jessica | Liljeblad heter jag" where one
     voice has been given two labels, or "så det | är svårt | att dra en gräns"
     where somebody talks over the main speaker.
 
     A sentence is the words up to one that ends with . ? ! or an ellipsis; the
     last words, if they have no such ending, may be an unfinished sentence and
-    are left alone. The main speaker needs at least MIN_MAIN_WORDS of it, so
-    that "Jag tycker | Nej!" is left alone. A short sentence of its own ("Ja.") is never touched,
-    since all its words have one speaker. An interruption that is itself a one
-    or two word sentence in the middle of someone's sentence ("Jag tycker att
-    vi | Nej! | borde ...") looks the same as the cases above and is moved too;
-    that is rarer than the errors this fixes.
+    are left alone. A short sentence of its own ("Ja.") is never touched, since
+    all its words have one speaker.
+
+    The known cost is a real interruption that looks like these errors: a
+    speaker cut off after one or two words of a sentence that someone else
+    then finishes ("Jag tycker | Nej!"), or a one or two word interruption in
+    the middle of a sentence ("Jag tycker att vi | Nej! | borde ..."). Those
+    words are moved too; that is rarer than the errors this fixes.
 
     words are the transcript words, speakers one entry per word, changed in
     place. The words may come from several chunks in a row, since Whisper ends
@@ -308,16 +313,28 @@ def _snap_to_sentence_majority(words: list, speakers: list) -> None:
         window = speakers[start:end]
         counts = {speaker: window.count(speaker) for speaker in window}
 
-        # The most words, and the first to speak among equals.
-        main = max(counts, key=lambda speaker: (counts[speaker], -window.index(speaker)))
+        if len(counts) > 1:
+            first = window[0]
+            leading = next(k for k, speaker in enumerate(window) if speaker != first)
+            rest = set(window[leading:])
 
-        if (
-            len(counts) > 1
-            and counts[main] >= MIN_MAIN_WORDS
-            and end - start - counts[main] <= MAX_SNAP_WORDS
-        ):
-            for k in range(start, end):
-                speakers[k] = main
+            if leading <= MAX_SNAP_WORDS and len(rest) == 1:
+                # Its first word or two belong to the speaker who says the
+                # rest. A change of speaker falls between sentences, not
+                # after the first word of one.
+                main = window[leading]
+            else:
+                # The most words, and the first to speak among equals.
+                main = max(counts, key=lambda speaker: (counts[speaker], -window.index(speaker)))
+
+                if counts[main] < MIN_MAIN_WORDS or (
+                    len(window) - counts[main] > MAX_SNAP_WORDS
+                ):
+                    main = None
+
+            if main is not None:
+                for k in range(start, end):
+                    speakers[k] = main
 
         start = end
 
