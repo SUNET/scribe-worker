@@ -31,7 +31,7 @@ import whisper_timestamped as whisper
 
 from huggingface_hub import snapshot_download
 from typing import Optional
-from utils.diarization import Diarizer, count_speakers
+from utils.diarization import Diarizer, SpeakerTimeline, count_speakers
 from utils.log import get_logger
 from utils.settings import get_settings
 from utils.words import (
@@ -404,6 +404,7 @@ class WhisperAudioTranscriber:
         Align transcription chunks with speaker diarization results.
         """
         aligned_segments = []
+        timeline = SpeakerTimeline(diarization)
 
         for chunk in transcription_chunks:
             chunk_start = chunk["start"]
@@ -412,10 +413,8 @@ class WhisperAudioTranscriber:
             avg_score = chunk.get("avg_score")
 
             chunk_middle = (chunk_start + chunk_end) / 2
-            dominant_speaker = self.__get_speaker(diarization, chunk_middle)
-            active_speakers = self.__get_speakers_in_range(
-                diarization, chunk_start, chunk_end
-            )
+            dominant_speaker = timeline.speaker_at(chunk_middle)
+            active_speakers = timeline.speakers_between(chunk_start, chunk_end)
 
             segment = {
                 "start": float(chunk_start),
@@ -432,29 +431,6 @@ class WhisperAudioTranscriber:
             aligned_segments.append(segment)
 
         return aligned_segments
-
-    def __get_speaker(self, diarization, time_point) -> str:
-        """
-        Get the speaker label for a specific time point in the diarization.
-        """
-        for start, end, speaker in diarization:
-            if start <= time_point <= end:
-                return speaker
-
-        return "Speaker_00"
-
-    def __get_speakers_in_range(self, diarization, start_time, end_time) -> list:
-        """
-        Get a list of active speakers within a specific time range in the
-        diarization.
-        """
-        active_speakers = set()
-
-        for start, end, speaker in diarization:
-            if not (end < start_time or start > end_time):
-                active_speakers.add(speaker)
-
-        return list(active_speakers)
 
     def subtitles(self) -> str:
         """

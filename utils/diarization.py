@@ -27,6 +27,9 @@ not matter and Nemotron's result, kept from the first run, is used.
 import logging
 import time
 
+from bisect import bisect_right
+from itertools import accumulate
+
 from typing import Any, Optional, Union
 
 import numpy as np
@@ -39,6 +42,59 @@ def count_speakers(segments: list) -> int:
     Number of distinct speakers in (start, end, speaker) tuples.
     """
     return len({speaker for _, _, speaker in segments})
+
+
+class SpeakerTimeline:
+    """
+    Who spoke when, indexed for fast lookups. Built once from (start, end,
+    speaker) tuples, in any order and with overlaps allowed, then queried for
+    each transcript chunk without scanning every segment.
+    """
+
+    def __init__(self, segments: list) -> None:
+        # Sorted by start. Remembering the original position keeps the
+        # "first segment in the list wins" rule of speaker_at().
+        order = sorted(range(len(segments)), key=lambda i: segments[i][0])
+
+        self.__positions = order
+        self.__starts = [segments[i][0] for i in order]
+        self.__ends = [segments[i][1] for i in order]
+        self.__speakers = [segments[i][2] for i in order]
+
+        # Running maximum of the ends: once it drops below the time asked
+        # for, no earlier segment can contain it.
+        self.__max_ends = list(accumulate(self.__ends, max))
+
+    def __overlapping(self, start: float, end: float):
+        """
+        Yield the sorted index of every segment that overlaps [start, end].
+        """
+        i = bisect_right(self.__starts, end) - 1
+
+        while i >= 0 and self.__max_ends[i] >= start:
+            if self.__ends[i] >= start:
+                yield i
+
+            i -= 1
+
+    def speaker_at(self, time_point: float) -> str:
+        """
+        Speaker at a point in time. If several overlap, the one that comes
+        first in the original list wins. Speaker_00 if nobody speaks.
+        """
+        found = min(
+            self.__overlapping(time_point, time_point),
+            key=lambda i: self.__positions[i],
+            default=None,
+        )
+
+        return "Speaker_00" if found is None else self.__speakers[found]
+
+    def speakers_between(self, start: float, end: float) -> list:
+        """
+        Sorted speakers that are active at some point in [start, end].
+        """
+        return sorted({self.__speakers[i] for i in self.__overlapping(start, end)})
 
 
 class Diarizer:

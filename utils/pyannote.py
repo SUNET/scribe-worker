@@ -44,7 +44,11 @@ def load_pipeline(device: str) -> Any:
     # Before the import, which is where pyannote warns about torchcodec.
     warnings.filterwarnings("ignore", module="pyannote")
     warnings.filterwarnings("ignore", message=".*torchcodec.*")
+    # pyannote sends usage telemetry (audio duration, speaker hints) to
+    # otel.pyannote.ai by default. Switch it off twice over: its own flag, and
+    # the OpenTelemetry SDK that carries it. Both before the import.
     os.environ["PYANNOTE_METRICS_ENABLED"] = "0"
+    os.environ["OTEL_SDK_DISABLED"] = "true"
 
     from pyannote.audio import Pipeline
     from pyannote.audio.telemetry import set_telemetry_metrics
