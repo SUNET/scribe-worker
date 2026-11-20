@@ -77,13 +77,13 @@ class Diarizer:
                 return nemotron_result
 
             self.__logger.info(
-                f"Nemotron found {found} speakers, the most it can report. "
-                "Diarizing again with pyannote."
+                f"Nemotron reached its limit of {nemotron.MAX_SPEAKERS} speakers, "
+                "so the count may be capped. Diarizing again with pyannote."
             )
         else:
             self.__logger.info(
-                f"{speakers} speakers configured, more than Nemotron handles. "
-                "Using pyannote."
+                f"{speakers} speakers configured, more than Nemotron's "
+                f"{nemotron.MAX_SPEAKERS}. Skipping it."
             )
 
         result = self.__run_pyannote(audio, sample_rate, speakers)
@@ -93,29 +93,39 @@ class Diarizer:
 
             if found <= nemotron.MAX_SPEAKERS:
                 self.__logger.info(
-                    f"pyannote found {found} speakers, not more than "
-                    f"{nemotron.MAX_SPEAKERS}. Using the Nemotron result."
+                    f"pyannote did not find more than {nemotron.MAX_SPEAKERS} "
+                    "speakers. Using the Nemotron result."
                 )
                 return nemotron_result
 
         return result
 
     def __run_nemotron(self, audio, sample_rate: int) -> list:
+        self.__logger.info("Diarizing with Nemotron")
+
         if not self.__nemotron:
             self.__nemotron = nemotron.load_model()
 
         t0 = time.monotonic()
         segments = nemotron.diarize(self.__nemotron, audio, sample_rate)
-        self.__logger.debug(f"Nemotron inference took {time.monotonic() - t0:.2f}s")
+        self.__logger.info(
+            f"Nemotron found {count_speakers(segments)} speakers, "
+            f"took {time.monotonic() - t0:.2f}s"
+        )
 
         return segments
 
     def __run_pyannote(self, audio, sample_rate: int, speakers: int) -> list:
+        self.__logger.info("Diarizing with pyannote")
+
         if not self.__pyannote:
             self.__pyannote = pyannote.load_pipeline(self.__device)
 
         t0 = time.monotonic()
         segments = pyannote.diarize(self.__pyannote, audio, speakers, sample_rate)
-        self.__logger.debug(f"pyannote inference took {time.monotonic() - t0:.2f}s")
+        self.__logger.info(
+            f"pyannote found {count_speakers(segments)} speakers, "
+            f"took {time.monotonic() - t0:.2f}s"
+        )
 
         return segments
