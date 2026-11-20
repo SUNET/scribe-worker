@@ -394,7 +394,12 @@ class WhisperAudioTranscriber:
 
         diarization = self.__diarizer.diarize(audio, sample_rate, speakers)
 
-        aligned_segments = align_speakers(self.__chunks, diarization)
+        aligned_segments = align_speakers(
+            self.__chunks,
+            diarization,
+            audio if isinstance(audio, np.ndarray) else None,
+            sample_rate,
+        )
 
         self.__logger.info(
             f"Diarization completed, took {time.monotonic() - started:.2f}s"

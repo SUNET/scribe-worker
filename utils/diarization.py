@@ -136,33 +136,81 @@ def _word_speakers(words: list, timeline: SpeakerTimeline, fallback: str) -> lis
     return speakers
 
 
-# Whisper's word timings and the diarization's speaker changes are not exact
-# to a fraction of a second, so the first or last word of a chunk, next to a
-# turn change, can land on the wrong side. A single word shorter than this
-# (seconds), at either end of a chunk, is not split off from its neighbour.
-# A judgment call from one recording: tune it against labelled data.
-MAX_EDGE_BLIP = 0.5
+# Audio is looked at in steps of this many seconds.
+FRAME = 0.01
+
+# A frame counts as speech when it is this many dB above the quiet floor of
+# the recording (its 20th percentile), and the floor is never taken below
+# FLOOR_LIMIT so that stretches of digital silence do not drag it down.
+SPEECH_MARGIN_DB = 6.0
+
+# Sound separated from the rest of a word by at least this many seconds of
+# quiet is taken to belong to a neighbouring word, and so is a fragment of
+# sound shorter than MIN_BLOCK (the tail of the word before, say).
+MIN_PAUSE = 0.1
+MIN_BLOCK = 0.06
+FLOOR_LIMIT_DB = -70.0
 
 
-def _absorb_edge_blips(runs: list, words: list) -> None:
+def speech_frames(audio: np.ndarray, sample_rate: int) -> np.ndarray:
     """
-    Merge a single short word at the start or end of a chunk into the run
-    next to it, so that timing jitter does not split off a lone word.
+    Indices of the FRAME-long steps of the audio that hold sound, as opposed
+    to the pauses between words and sentences. Steady background noise
+    raises the floor with it, so it is not mistaken for speech.
     """
+    hop = int(sample_rate * FRAME)
+    frames = len(audio) // hop
 
-    def is_blip(run: list) -> bool:
-        first, last = run[1], run[2]
-        return last - first == 1 and (
-            words[first]["e"] - words[first]["s"] < MAX_EDGE_BLIP
-        )
+    if frames == 0:
+        return np.array([], dtype=int)
 
-    while len(runs) > 1 and is_blip(runs[0]):
-        runs[1][1] = runs[0][1]
-        del runs[0]
+    # In blocks, so a long recording is not copied whole.
+    level = np.empty(frames)
+    block = 6000
 
-    while len(runs) > 1 and is_blip(runs[-1]):
-        runs[-2][2] = runs[-1][2]
-        del runs[-1]
+    for first in range(0, frames, block):
+        last = min(first + block, frames)
+        part = audio[first * hop : last * hop].reshape(last - first, hop)
+        rms = np.sqrt(np.mean(np.square(part, dtype=np.float32), axis=1))
+        level[first:last] = 20 * np.log10(rms + 1e-9)
+
+    floor = max(np.percentile(level, 20), FLOOR_LIMIT_DB)
+
+    return np.flatnonzero(level > floor + SPEECH_MARGIN_DB)
+
+
+def trim_to_speech(words: list, speech: np.ndarray) -> list:
+    """
+    Shrink each word's (s, e) to the first substantial block of sound inside
+    it. Whisper stretches a word across the pause next to it, and the tail of
+    the word before can reach into it, so a word that starts a turn can
+    overlap the speaker before it, and one that ends a turn the speaker
+    after it. Sound after the first pause belongs to the next word (Whisper
+    squeezes those together), so it is not part of this one. A word with no
+    sound in it is left as it was. Returns copies, in the same order.
+    """
+    trimmed = []
+    max_step = MIN_PAUSE / FRAME
+
+    for word in words:
+        lo = int(np.searchsorted(speech, int(word["s"] / FRAME)))
+        hi = int(np.searchsorted(speech, int(np.ceil(word["e"] / FRAME))))
+
+        if hi > lo:
+            # Blocks of sound, split wherever there is a real pause.
+            blocks = np.split(
+                speech[lo:hi], np.flatnonzero(np.diff(speech[lo:hi]) > max_step) + 1
+            )
+            block = next(
+                (b for b in blocks if len(b) * FRAME >= MIN_BLOCK),
+                max(blocks, key=len),
+            )
+
+            word = dict(word, s=block[0] * FRAME, e=(block[-1] + 1) * FRAME)
+
+        trimmed.append(word)
+
+    return trimmed
 
 
 def _piece(chunk: dict, timeline: SpeakerTimeline, start, end, speaker, text, score):
@@ -181,7 +229,12 @@ def _piece(chunk: dict, timeline: SpeakerTimeline, start, end, speaker, text, sc
     return piece
 
 
-def align_speakers(chunks: list, diarization: list) -> list:
+def align_speakers(
+    chunks: list,
+    diarization: list,
+    audio: Optional[np.ndarray] = None,
+    sample_rate: int = nemotron.SAMPLE_RATE,
+) -> list:
     """
     Give every transcript chunk a speaker, from (start, end, speaker) tuples.
 
@@ -193,10 +246,15 @@ def align_speakers(chunks: list, diarization: list) -> list:
     gap between the words on either side. A chunk without words, or one with
     a single speaker, stays whole, and then keeps its own text.
 
+    With the audio (a float32 mono array), words are first trimmed to where
+    there is sound (see trim_to_speech), which keeps a word next to a pause
+    from being credited to the wrong side of a turn change.
+
     Returns segments with start, end, text, speaker, active_speakers,
     duration and, when known, avg_score.
     """
     timeline = SpeakerTimeline(diarization)
+    speech = speech_frames(audio, sample_rate) if audio is not None else None
     aligned = []
 
     for chunk in chunks:
@@ -212,7 +270,10 @@ def align_speakers(chunks: list, diarization: list) -> list:
             )
             continue
 
-        speakers = _word_speakers(words, timeline, fallback)
+        # Trimmed words decide who speaks and where the cuts fall; the
+        # original words supply the text.
+        heard = trim_to_speech(words, speech) if speech is not None else words
+        speakers = _word_speakers(heard, timeline, fallback)
 
         # Runs of consecutive words by one speaker: [speaker, first, last + 1].
         runs = []
@@ -223,8 +284,6 @@ def align_speakers(chunks: list, diarization: list) -> list:
             else:
                 runs.append([speaker, i, i + 1])
 
-        _absorb_edge_blips(runs, words)
-
         if len(runs) == 1:
             aligned.append(
                 _piece(chunk, timeline, start, end, runs[0][0], chunk["text"], score)
@@ -233,7 +292,7 @@ def align_speakers(chunks: list, diarization: list) -> list:
 
         # Cut midway between the last word of a run and the first of the next.
         cuts = [
-            min(max((words[a[2] - 1]["e"] + words[b[1]]["s"]) / 2, start), end)
+            min(max((heard[a[2] - 1]["e"] + heard[b[1]]["s"]) / 2, start), end)
             for a, b in zip(runs, runs[1:])
         ]
 
