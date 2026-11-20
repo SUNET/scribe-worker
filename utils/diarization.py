@@ -66,6 +66,12 @@ class SpeakerTimeline:
         # for, no earlier segment can contain it.
         self.__max_ends = list(accumulate(self.__ends, max))
 
+        # Each speaker's segments as (start, end), sorted by start.
+        self.__by_speaker: dict = {}
+
+        for start, end, speaker in sorted(segments, key=lambda x: x[0]):
+            self.__by_speaker.setdefault(speaker, []).append((start, end))
+
     def __overlapping(self, start: float, end: float):
         """
         Yield the sorted index of every segment that overlaps [start, end].
@@ -90,6 +96,28 @@ class SpeakerTimeline:
         )
 
         return "Speaker_00" if found is None else self.__speakers[found]
+
+    def is_active(self, speaker: str, time_point: float) -> bool:
+        """
+        Whether the speaker is speaking at a point in time.
+        """
+        return any(
+            self.__speakers[i] == speaker
+            for i in self.__overlapping(time_point, time_point)
+        )
+
+    def next_onset(self, speaker: str, after: float, before: float) -> Optional[float]:
+        """
+        When the speaker next starts speaking, strictly after `after` and
+        before `before`, or None.
+        """
+        spans = self.__by_speaker.get(speaker, [])
+        i = bisect_right([start for start, _ in spans], after)
+
+        if i < len(spans) and spans[i][0] < before:
+            return spans[i][0]
+
+        return None
 
     def dominant_speaker(self, start: float, end: float) -> Optional[str]:
         """
@@ -213,14 +241,19 @@ def trim_to_speech(words: list, speech: np.ndarray) -> list:
     return trimmed
 
 
-# When the speaker changes in the middle of a sentence, right after the start
-# of that sentence, the diarization has usually switched a moment too late
-# (the new speaker's first words overlap the old speaker's segment), or
-# Whisper has stamped those words at the wrong time. Up to this many words are
-# moved over to the new speaker. There is deliberately no check for a pause at
-# the change: a misplaced word leaves a long fake pause behind it (over a
-# second, on real recordings), so it says nothing about a real interruption.
+# When the speaker changes in the middle of a sentence, within the first or
+# last word or two of it, the change is almost certainly in the wrong place:
+# the diarization switched a moment too late or early (the words overlap two
+# speakers about equally), or Whisper stamped those words at the wrong time.
+# Up to this many words are moved, to the speaker who has the rest of the
+# sentence. There is deliberately no check for a pause at the change: a
+# misplaced word leaves a long fake pause behind it (over a second, on real
+# recordings), so a pause says nothing about a real interruption.
 MAX_SNAP_WORDS = 2
+
+# A sentence that the previous speaker has begun is only completed by the next
+# one's first words if they have said at least this many words of it.
+MIN_OPEN_SENTENCE = 3
 
 SENTENCE_END = (".", "?", "!", "\u2026")
 CLOSING_MARKS = "\"')]}\u00bb\u201d\u2019"
@@ -230,10 +263,23 @@ def _ends_sentence(text: str) -> bool:
     return text.rstrip(CLOSING_MARKS).endswith(SENTENCE_END)
 
 
-def _snap_to_sentence_start(words: list, speakers: list) -> None:
+def _snap_to_sentence_boundary(words: list, speakers: list) -> None:
     """
-    Fix a speaker change that falls just after the first word or two of a
-    sentence by moving those words to the speaker who finishes the sentence.
+    Fix a speaker change that falls in the middle of a sentence, close to
+    one of its ends, by moving the few words on the short side to the speaker
+    who has the rest of the sentence:
+
+    - the change comes right after a sentence's first word or two: those
+      words go to the next speaker ("... rätt. Vad | skulle det vara?");
+    - the change comes right before a sentence's last word or two: those words
+      go back to the previous speaker ("Borde det vara obligatoriskt
+      oavsett skolans | form? Ja, men ...").
+
+    At least one word always stays with each speaker. An interruption
+    that is itself a one or two word sentence ("Jag tycker att vi | Nej!")
+    looks the same as the second case and is moved too; that is rarer than
+    the errors this fixes.
+
     words are the transcript words, speakers one entry per word, changed in
     place. The words may come from several chunks in a row, since Whisper ends
     a chunk wherever it likes, in the middle of a sentence too.
@@ -242,23 +288,98 @@ def _snap_to_sentence_start(words: list, speakers: list) -> None:
         if speakers[i] == speakers[i - 1] or _ends_sentence(words[i - 1]["t"]):
             continue
 
-        # First word of the run that ends here: at least one word stays.
-        floor = i - 1
+        # Where the run before the change starts (at least one word stays).
+        first_of_run = i - 1
 
-        while floor > 0 and speakers[floor - 1] == speakers[i - 1]:
-            floor -= 1
+        while first_of_run > 0 and speakers[first_of_run - 1] == speakers[i - 1]:
+            first_of_run -= 1
 
-        for back in range(1, MAX_SNAP_WORDS + 1):
-            first = i - back
+        # Where the run after it ends (at least one word stays).
+        end_of_run = i
 
-            if first <= floor:
-                break
+        while end_of_run < len(words) and speakers[end_of_run] == speakers[i]:
+            end_of_run += 1
 
-            if _ends_sentence(words[first - 1]["t"]):
-                for k in range(first, i):
-                    speakers[k] = speakers[i]
+        # Words of the sentence that the change interrupts, before it.
+        start_of_sentence = i
 
-                break
+        while start_of_sentence > 0 and not _ends_sentence(
+            words[start_of_sentence - 1]["t"]
+        ):
+            start_of_sentence -= 1
+
+        # Backwards: the sentence starts just before the change.
+        back = next(
+            (
+                n
+                for n in range(1, MAX_SNAP_WORDS + 1)
+                if i - n > first_of_run and _ends_sentence(words[i - n - 1]["t"])
+            ),
+            None,
+        )
+
+        # Forwards: the sentence ends just after the change.
+        forward = next(
+            (
+                n
+                for n in range(1, MAX_SNAP_WORDS + 1)
+                if i + n < end_of_run
+                and i - start_of_sentence >= MIN_OPEN_SENTENCE
+                and _ends_sentence(words[i + n - 1]["t"])
+            ),
+            None,
+        )
+
+        # A sentence the change interrupts is at least MIN_OPEN_SENTENCE words
+        # long before it, and more than MAX_SNAP_WORDS, so at most one of the
+        # two can apply.
+        if back is not None:
+            for k in range(i - back, i):
+                speakers[k] = speakers[i]
+        elif forward is not None:
+            for k in range(i, i + forward):
+                speakers[k] = speakers[i - 1]
+
+
+# A piece should not start long before its speaker does. Diarization onsets
+# lag a little behind the speech (by a tenth of a second or so), so a start
+# that precedes the onset by no more than this is left as Whisper had it.
+ONSET_TOLERANCE = 0.15
+
+
+def _start_at_onset(
+    timeline: "SpeakerTimeline",
+    speech: Optional[np.ndarray],
+    speaker: str,
+    start: float,
+    end: float,
+) -> float:
+    """
+    Where a piece by the speaker should start, given that Whisper started it
+    at `start`. Whisper stamps words wrongly when its text skips something
+    that was said, and then a piece can start seconds before its speaker has
+    said anything. If the speaker is not speaking at `start` and does not
+    begin to within ONSET_TOLERANCE, it starts at the first sound from the
+    diarization onset (less the tolerance) instead, as long as that is still
+    inside the piece.
+    """
+    if timeline.is_active(speaker, start):
+        return start
+
+    onset = timeline.next_onset(speaker, start, end)
+
+    if onset is None or onset - start <= ONSET_TOLERANCE:
+        return start
+
+    earliest = onset - ONSET_TOLERANCE
+
+    if speech is not None:
+        i = int(np.searchsorted(speech, int(np.ceil(earliest / FRAME))))
+
+        if i < len(speech) and speech[i] * FRAME < end:
+            return max(start, float(speech[i] * FRAME))
+
+    return max(start, earliest)
 
 
 def _piece(chunk: dict, timeline: SpeakerTimeline, start, end, speaker, text, score):
@@ -297,9 +418,9 @@ def align_speakers(
     With the audio (a float32 mono array), words are first trimmed to where
     there is sound (see trim_to_speech), which keeps a word next to a pause
     from being credited to the wrong side of a turn change. A change of
-    speaker in the middle of a sentence, just after its first word or two, is
-    moved back to the start of the sentence (see _snap_to_sentence_start),
-    also across the boundary between two chunks.
+    speaker in the middle of a sentence, within its first or last word or two,
+    is moved to the sentence's edge (see _snap_to_sentence_boundary), also
+    across the boundary between two chunks.
 
     Returns segments with start, end, text, speaker, active_speakers,
     duration and, when known, avg_score.
@@ -341,7 +462,7 @@ def align_speakers(
         flat_words = [word for i in group for word in chunks[i]["words"]]
         flat_speakers = [speaker for i in group for speaker in prepared[i][1]]
 
-        _snap_to_sentence_start(flat_words, flat_speakers)
+        _snap_to_sentence_boundary(flat_words, flat_speakers)
 
         position = 0
 
@@ -359,13 +480,14 @@ def align_speakers(
         score = chunk.get("avg_score")
 
         if ready is None:
+            speaker = timeline.speaker_at((start + end) / 2)
             aligned.append(
                 _piece(
                     chunk,
                     timeline,
-                    start,
+                    _start_at_onset(timeline, speech, speaker, start, end),
                     end,
-                    timeline.speaker_at((start + end) / 2),
+                    speaker,
                     chunk["text"],
                     score,
                 )
@@ -385,19 +507,35 @@ def align_speakers(
                 runs.append([speaker, i, i + 1])
 
         if len(runs) == 1:
+            speaker = runs[0][0]
             aligned.append(
-                _piece(chunk, timeline, start, end, runs[0][0], chunk["text"], score)
+                _piece(
+                    chunk,
+                    timeline,
+                    _start_at_onset(timeline, speech, speaker, start, end),
+                    end,
+                    speaker,
+                    chunk["text"],
+                    score,
+                )
             )
             continue
 
-        # Cut midway between the last word of a run and the first of the next.
+        # Cut midway between the last word of a run and the first of the next,
+        # but not before the next speaker has begun to speak.
         cuts = [
             min(max((heard[a[2] - 1]["e"] + heard[b[1]]["s"]) / 2, start), end)
             for a, b in zip(runs, runs[1:])
         ]
 
+        for k in range(len(cuts)):
+            limit = cuts[k + 1] if k + 1 < len(cuts) else end
+            cuts[k] = _start_at_onset(timeline, speech, runs[k + 1][0], cuts[k], limit)
+
+        starts = [_start_at_onset(timeline, speech, runs[0][0], start, cuts[0])]
+
         for (speaker, first, last), piece_start, piece_end in zip(
-            runs, [start] + cuts, cuts + [end]
+            runs, starts + cuts, cuts + [end]
         ):
             piece_words = words[first:last]
 
