@@ -213,6 +213,57 @@ def trim_to_speech(words: list, speech: np.ndarray) -> list:
     return trimmed
 
 
+# When the speaker changes in the middle of a sentence, right after the start
+# of that sentence, the diarization has usually switched a moment too late
+# (the new speaker's first words overlap the old speaker's segment). Up to
+# this many words are moved over to the new speaker, unless there is a pause of
+# SNAP_PAUSE seconds or more at the change, which looks like a real one.
+MAX_SNAP_WORDS = 2
+SNAP_PAUSE = 0.3
+
+SENTENCE_END = (".", "?", "!", "\u2026")
+CLOSING_MARKS = "\"')]}\u00bb\u201d\u2019"
+
+
+def _ends_sentence(text: str) -> bool:
+    return text.rstrip(CLOSING_MARKS).endswith(SENTENCE_END)
+
+
+def _snap_to_sentence_start(words: list, heard: list, speakers: list) -> None:
+    """
+    Fix a speaker change that falls just after the first word or two of a
+    sentence by moving those words to the speaker who finishes the sentence.
+    words are the transcript words, heard the same words trimmed to speech
+    (for the pauses), speakers one entry per word, changed in place. The
+    words may come from several chunks in a row, since Whisper ends a chunk
+    wherever it likes, in the middle of a sentence too.
+    """
+    for i in range(1, len(words)):
+        if speakers[i] == speakers[i - 1] or _ends_sentence(words[i - 1]["t"]):
+            continue
+
+        if heard[i]["s"] - heard[i - 1]["e"] >= SNAP_PAUSE:
+            continue
+
+        # First word of the run that ends here: at least one word stays.
+        floor = i - 1
+
+        while floor > 0 and speakers[floor - 1] == speakers[i - 1]:
+            floor -= 1
+
+        for back in range(1, MAX_SNAP_WORDS + 1):
+            first = i - back
+
+            if first <= floor:
+                break
+
+            if _ends_sentence(words[first - 1]["t"]):
+                for k in range(first, i):
+                    speakers[k] = speakers[i]
+
+                break
+
+
 def _piece(chunk: dict, timeline: SpeakerTimeline, start, end, speaker, text, score):
     piece = {
         "start": float(start),
@@ -248,32 +299,85 @@ def align_speakers(
 
     With the audio (a float32 mono array), words are first trimmed to where
     there is sound (see trim_to_speech), which keeps a word next to a pause
-    from being credited to the wrong side of a turn change.
+    from being credited to the wrong side of a turn change. A change of
+    speaker in the middle of a sentence, just after its first word or two, is
+    moved back to the start of the sentence (see _snap_to_sentence_start),
+    also across the boundary between two chunks.
 
     Returns segments with start, end, text, speaker, active_speakers,
     duration and, when known, avg_score.
     """
     timeline = SpeakerTimeline(diarization)
     speech = speech_frames(audio, sample_rate) if audio is not None else None
-    aligned = []
+
+    # Per chunk with words: the words trimmed to speech, and who speaks each.
+    # Trimmed words decide who speaks and where the cuts fall; the original
+    # words supply the text.
+    prepared = []
 
     for chunk in chunks:
-        start, end = chunk["start"], chunk["end"]
-        score = chunk.get("avg_score")
         words = chunk.get("words")
 
-        fallback = timeline.speaker_at((start + end) / 2)
-
         if not words:
+            prepared.append(None)
+            continue
+
+        heard = trim_to_speech(words, speech) if speech is not None else words
+        fallback = timeline.speaker_at((chunk["start"] + chunk["end"]) / 2)
+        prepared.append((heard, _word_speakers(heard, timeline, fallback)))
+
+    # Speaker changes are fixed over runs of chunks that have words, so a
+    # change at the very end of one chunk can still be moved.
+    index = 0
+
+    while index < len(chunks):
+        if prepared[index] is None:
+            index += 1
+            continue
+
+        end = index
+
+        while end < len(chunks) and prepared[end] is not None:
+            end += 1
+
+        group = range(index, end)
+        flat_words = [word for i in group for word in chunks[i]["words"]]
+        flat_heard = [word for i in group for word in prepared[i][0]]
+        flat_speakers = [speaker for i in group for speaker in prepared[i][1]]
+
+        _snap_to_sentence_start(flat_words, flat_heard, flat_speakers)
+
+        position = 0
+
+        for i in group:
+            count = len(prepared[i][1])
+            prepared[i] = (prepared[i][0], flat_speakers[position : position + count])
+            position += count
+
+        index = end
+
+    aligned = []
+
+    for chunk, ready in zip(chunks, prepared):
+        start, end = chunk["start"], chunk["end"]
+        score = chunk.get("avg_score")
+
+        if ready is None:
             aligned.append(
-                _piece(chunk, timeline, start, end, fallback, chunk["text"], score)
+                _piece(
+                    chunk,
+                    timeline,
+                    start,
+                    end,
+                    timeline.speaker_at((start + end) / 2),
+                    chunk["text"],
+                    score,
+                )
             )
             continue
 
-        # Trimmed words decide who speaks and where the cuts fall; the
-        # original words supply the text.
-        heard = trim_to_speech(words, speech) if speech is not None else words
-        speakers = _word_speakers(heard, timeline, fallback)
+        words = chunk["words"]
+        heard, speakers = ready
 
         # Runs of consecutive words by one speaker: [speaker, first, last + 1].
         runs = []
