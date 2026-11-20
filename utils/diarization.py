@@ -215,11 +215,12 @@ def trim_to_speech(words: list, speech: np.ndarray) -> list:
 
 # When the speaker changes in the middle of a sentence, right after the start
 # of that sentence, the diarization has usually switched a moment too late
-# (the new speaker's first words overlap the old speaker's segment). Up to
-# this many words are moved over to the new speaker, unless there is a pause of
-# SNAP_PAUSE seconds or more at the change, which looks like a real one.
+# (the new speaker's first words overlap the old speaker's segment), or
+# Whisper has stamped those words at the wrong time. Up to this many words are
+# moved over to the new speaker. There is deliberately no check for a pause at
+# the change: a misplaced word leaves a long fake pause behind it (over a
+# second, on real recordings), so it says nothing about a real interruption.
 MAX_SNAP_WORDS = 2
-SNAP_PAUSE = 0.3
 
 SENTENCE_END = (".", "?", "!", "\u2026")
 CLOSING_MARKS = "\"')]}\u00bb\u201d\u2019"
@@ -229,20 +230,16 @@ def _ends_sentence(text: str) -> bool:
     return text.rstrip(CLOSING_MARKS).endswith(SENTENCE_END)
 
 
-def _snap_to_sentence_start(words: list, heard: list, speakers: list) -> None:
+def _snap_to_sentence_start(words: list, speakers: list) -> None:
     """
     Fix a speaker change that falls just after the first word or two of a
     sentence by moving those words to the speaker who finishes the sentence.
-    words are the transcript words, heard the same words trimmed to speech
-    (for the pauses), speakers one entry per word, changed in place. The
-    words may come from several chunks in a row, since Whisper ends a chunk
-    wherever it likes, in the middle of a sentence too.
+    words are the transcript words, speakers one entry per word, changed in
+    place. The words may come from several chunks in a row, since Whisper ends
+    a chunk wherever it likes, in the middle of a sentence too.
     """
     for i in range(1, len(words)):
         if speakers[i] == speakers[i - 1] or _ends_sentence(words[i - 1]["t"]):
-            continue
-
-        if heard[i]["s"] - heard[i - 1]["e"] >= SNAP_PAUSE:
             continue
 
         # First word of the run that ends here: at least one word stays.
@@ -342,10 +339,9 @@ def align_speakers(
 
         group = range(index, end)
         flat_words = [word for i in group for word in chunks[i]["words"]]
-        flat_heard = [word for i in group for word in prepared[i][0]]
         flat_speakers = [speaker for i in group for speaker in prepared[i][1]]
 
-        _snap_to_sentence_start(flat_words, flat_heard, flat_speakers)
+        _snap_to_sentence_start(flat_words, flat_speakers)
 
         position = 0
 
