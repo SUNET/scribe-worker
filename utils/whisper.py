@@ -31,7 +31,7 @@ import whisper_timestamped as whisper
 
 from huggingface_hub import snapshot_download
 from typing import Optional
-from utils.diarization import Diarizer, SpeakerTimeline, count_speakers
+from utils.diarization import Diarizer, align_speakers, count_speakers
 from utils.log import get_logger
 from utils.settings import get_settings
 from utils.words import (
@@ -242,12 +242,17 @@ class WhisperAudioTranscriber:
                     start_time, end_time, words, first_part
                 )
 
+                # The words follow the cut in time, however it was chosen.
+                first_words = [w for w in words if (w["s"] + w["e"]) / 2 < mid_time]
+                second_words = words[len(first_words) :]
+
                 chunks.append(
                     {
                         "start": start_time,
                         "end": mid_time,
                         "text": first_part,
                         "avg_score": avg_score,
+                        "words": first_words,
                     }
                 )
 
@@ -257,6 +262,7 @@ class WhisperAudioTranscriber:
                         "end": end_time,
                         "text": second_part,
                         "avg_score": avg_score,
+                        "words": second_words,
                     }
                 )
 
@@ -268,6 +274,7 @@ class WhisperAudioTranscriber:
                     "end": end_time,
                     "text": text,
                     "avg_score": avg_score,
+                    "words": words,
                 }
             )
 
@@ -387,7 +394,7 @@ class WhisperAudioTranscriber:
 
         diarization = self.__diarizer.diarize(audio, sample_rate, speakers)
 
-        aligned_segments = self.__align_speakers(self.__chunks, diarization)
+        aligned_segments = align_speakers(self.__chunks, diarization)
 
         self.__logger.info(
             f"Diarization completed, took {time.monotonic() - started:.2f}s"
@@ -398,39 +405,6 @@ class WhisperAudioTranscriber:
             "segments": aligned_segments,
             "speaker_count": count_speakers(diarization),
         }
-
-    def __align_speakers(self, transcription_chunks, diarization) -> list:
-        """
-        Align transcription chunks with speaker diarization results.
-        """
-        aligned_segments = []
-        timeline = SpeakerTimeline(diarization)
-
-        for chunk in transcription_chunks:
-            chunk_start = chunk["start"]
-            chunk_end = chunk["end"]
-            chunk_text = chunk["text"]
-            avg_score = chunk.get("avg_score")
-
-            chunk_middle = (chunk_start + chunk_end) / 2
-            dominant_speaker = timeline.speaker_at(chunk_middle)
-            active_speakers = timeline.speakers_between(chunk_start, chunk_end)
-
-            segment = {
-                "start": float(chunk_start),
-                "end": float(chunk_end),
-                "text": chunk_text.strip(),
-                "speaker": dominant_speaker,
-                "active_speakers": active_speakers,
-                "duration": float(chunk_end - chunk_start),
-            }
-
-            if avg_score is not None:
-                segment["avg_score"] = avg_score
-
-            aligned_segments.append(segment)
-
-        return aligned_segments
 
     def subtitles(self) -> str:
         """
