@@ -122,9 +122,16 @@ class SpeakerTimeline:
     def dominant_speaker(self, start: float, end: float) -> Optional[str]:
         """
         Speaker who speaks the most of [start, end], or None if nobody does.
-        Ties go to the first speaker alphabetically, so the result is stable.
+
+        When two speakers cover it about equally, one is talking over the
+        other, and Whisper has transcribed one of the voices. It is the one
+        whose segment goes on the longest: an interjection ends inside the main
+        speaker's segment, and the previous speaker's segment ends inside the
+        next speaker's turn. That speaker wins a tie, and after that the first
+        alphabetically, so the result is stable.
         """
         overlap: dict = {}
+        latest_end: dict = {}
 
         for i in self.__overlapping(start, end):
             shared = min(end, self.__ends[i]) - max(start, self.__starts[i])
@@ -132,11 +139,15 @@ class SpeakerTimeline:
             if shared > 0:
                 speaker = self.__speakers[i]
                 overlap[speaker] = overlap.get(speaker, 0.0) + shared
+                latest_end[speaker] = max(latest_end.get(speaker, 0.0), self.__ends[i])
 
         if not overlap:
             return None
 
-        return max(sorted(overlap), key=overlap.get)
+        best = max(overlap.values())
+        tied = [speaker for speaker, shared in overlap.items() if shared >= best - TIE]
+
+        return min(tied, key=lambda speaker: (-latest_end[speaker], speaker))
 
     def speakers_between(self, start: float, end: float) -> list:
         """
@@ -163,6 +174,10 @@ def _word_speakers(words: list, timeline: SpeakerTimeline, fallback: str) -> lis
 
     return speakers
 
+
+# Two speakers whose overlap with a word differs by less than this (seconds)
+# are taken to cover it equally.
+TIE = 0.02
 
 # Audio is looked at in steps of this many seconds.
 FRAME = 0.01
