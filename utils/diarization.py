@@ -256,19 +256,18 @@ def trim_to_speech(words: list, speech: np.ndarray) -> list:
     return trimmed
 
 
-# When the speaker changes in the middle of a sentence, within the first or
-# last word or two of it, the change is almost certainly in the wrong place:
-# the diarization switched a moment too late or early (the words overlap two
-# speakers about equally), or Whisper stamped those words at the wrong time.
-# Up to this many words are moved, to the speaker who has the rest of the
-# sentence. There is deliberately no check for a pause at the change: a
+# A sentence is one speaker's, with at most this many of its words credited to
+# someone else. Those few words are almost certainly the diarization's doing
+# (a speaker change a moment too early or late, a word that overlaps two
+# speakers, or one voice given two labels), or Whisper stamping them at the
+# wrong time. There is deliberately no check for a pause at the change: a
 # misplaced word leaves a long fake pause behind it (over a second, on real
 # recordings), so a pause says nothing about a real interruption.
 MAX_SNAP_WORDS = 2
 
-# A sentence that the previous speaker has begun is only completed by the next
-# one's first words if they have said at least this many words of it.
-MIN_OPEN_SENTENCE = 3
+# ... and the sentence must have at least this many words by the main speaker,
+# which is what makes the others' words a stray few and not a short exchange.
+MIN_MAIN_WORDS = 3
 
 SENTENCE_END = (".", "?", "!", "\u2026")
 CLOSING_MARKS = "\"')]}\u00bb\u201d\u2019"
@@ -278,82 +277,49 @@ def _ends_sentence(text: str) -> bool:
     return text.rstrip(CLOSING_MARKS).endswith(SENTENCE_END)
 
 
-def _snap_to_sentence_boundary(words: list, speakers: list) -> None:
+def _snap_to_sentence_majority(words: list, speakers: list) -> None:
     """
-    Fix a speaker change that falls in the middle of a sentence, close to
-    one of its ends, by moving the few words on the short side to the speaker
-    who has the rest of the sentence:
+    Give a sentence to the one speaker who says most of it, when somebody
+    else has been credited with only its first, last or any other one or two
+    words. For example "Vad | skulle det kunna vara?" at a change of speaker,
+    "oavsett skolans | form?", a lone "Jessica | Liljeblad heter jag" where one
+    voice has been given two labels, or "så det | är svårt | att dra en gräns"
+    where somebody talks over the main speaker.
 
-    - the change comes right after a sentence's first word or two: those
-      words go to the next speaker ("... rätt. Vad | skulle det vara?");
-    - the change comes right before a sentence's last word or two: those words
-      go back to the previous speaker ("Borde det vara obligatoriskt
-      oavsett skolans | form? Ja, men ...").
-
-    At least one word always stays with each speaker. An interruption
-    that is itself a one or two word sentence ("Jag tycker att vi | Nej!")
-    looks the same as the second case and is moved too; that is rarer than
-    the errors this fixes.
+    A sentence is the words up to one that ends with . ? ! or an ellipsis; the
+    last words, if they have no such ending, may be an unfinished sentence and
+    are left alone. The main speaker needs at least MIN_MAIN_WORDS of it, so
+    that "Jag tycker | Nej!" is left alone. A short sentence of its own ("Ja.") is never touched,
+    since all its words have one speaker. An interruption that is itself a one
+    or two word sentence in the middle of someone's sentence ("Jag tycker att
+    vi | Nej! | borde ...") looks the same as the cases above and is moved too;
+    that is rarer than the errors this fixes.
 
     words are the transcript words, speakers one entry per word, changed in
     place. The words may come from several chunks in a row, since Whisper ends
     a chunk wherever it likes, in the middle of a sentence too.
     """
-    for i in range(1, len(words)):
-        if speakers[i] == speakers[i - 1] or _ends_sentence(words[i - 1]["t"]):
+    start = 0
+
+    for end in range(1, len(words) + 1):
+        if not _ends_sentence(words[end - 1]["t"]):
             continue
 
-        # Where the run before the change starts (at least one word stays).
-        first_of_run = i - 1
+        window = speakers[start:end]
+        counts = {speaker: window.count(speaker) for speaker in window}
 
-        while first_of_run > 0 and speakers[first_of_run - 1] == speakers[i - 1]:
-            first_of_run -= 1
+        # The most words, and the first to speak among equals.
+        main = max(counts, key=lambda speaker: (counts[speaker], -window.index(speaker)))
 
-        # Where the run after it ends (at least one word stays).
-        end_of_run = i
-
-        while end_of_run < len(words) and speakers[end_of_run] == speakers[i]:
-            end_of_run += 1
-
-        # Words of the sentence that the change interrupts, before it.
-        start_of_sentence = i
-
-        while start_of_sentence > 0 and not _ends_sentence(
-            words[start_of_sentence - 1]["t"]
+        if (
+            len(counts) > 1
+            and counts[main] >= MIN_MAIN_WORDS
+            and end - start - counts[main] <= MAX_SNAP_WORDS
         ):
-            start_of_sentence -= 1
+            for k in range(start, end):
+                speakers[k] = main
 
-        # Backwards: the sentence starts just before the change.
-        back = next(
-            (
-                n
-                for n in range(1, MAX_SNAP_WORDS + 1)
-                if i - n > first_of_run and _ends_sentence(words[i - n - 1]["t"])
-            ),
-            None,
-        )
-
-        # Forwards: the sentence ends just after the change.
-        forward = next(
-            (
-                n
-                for n in range(1, MAX_SNAP_WORDS + 1)
-                if i + n < end_of_run
-                and i - start_of_sentence >= MIN_OPEN_SENTENCE
-                and _ends_sentence(words[i + n - 1]["t"])
-            ),
-            None,
-        )
-
-        # A sentence the change interrupts is at least MIN_OPEN_SENTENCE words
-        # long before it, and more than MAX_SNAP_WORDS, so at most one of the
-        # two can apply.
-        if back is not None:
-            for k in range(i - back, i):
-                speakers[k] = speakers[i]
-        elif forward is not None:
-            for k in range(i, i + forward):
-                speakers[k] = speakers[i - 1]
+        start = end
 
 
 # A piece should not start long before its speaker does. Diarization onsets
@@ -433,8 +399,8 @@ def align_speakers(
     With the audio (a float32 mono array), words are first trimmed to where
     there is sound (see trim_to_speech), which keeps a word next to a pause
     from being credited to the wrong side of a turn change. A change of
-    speaker in the middle of a sentence, within its first or last word or two,
-    is moved to the sentence's edge (see _snap_to_sentence_boundary), also
+    speaker for just a word or two of a sentence that someone else says the
+    rest of is given to that speaker (see _snap_to_sentence_majority), also
     across the boundary between two chunks.
 
     Returns segments with start, end, text, speaker, active_speakers,
@@ -477,7 +443,7 @@ def align_speakers(
         flat_words = [word for i in group for word in chunks[i]["words"]]
         flat_speakers = [speaker for i in group for speaker in prepared[i][1]]
 
-        _snap_to_sentence_boundary(flat_words, flat_speakers)
+        _snap_to_sentence_majority(flat_words, flat_speakers)
 
         position = 0
 
