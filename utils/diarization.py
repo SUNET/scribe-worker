@@ -46,6 +46,18 @@ def count_speakers(segments: list) -> int:
     return len({speaker for _, _, speaker in segments})
 
 
+def serialize_diarization(segments: list) -> list[dict]:
+    """
+    Serialize raw (start, end, speaker) diarization intervals for JSON results,
+    preserving overlaps, full timestamp precision, and turns without
+    transcribed words.
+    """
+    return [
+        {"start": float(start), "end": float(end), "speaker": speaker}
+        for start, end, speaker in segments
+    ]
+
+
 class SpeakerTimeline:
     """
     Who spoke when, indexed for fast lookups. Built once from (start, end,
