@@ -35,6 +35,7 @@ from typing import Any, Optional, Union
 import numpy as np
 
 from utils import nemotron, pyannote
+from utils.settings import get_settings
 from utils.words import average_confidence
 
 
@@ -569,8 +570,13 @@ class Diarizer:
     """
 
     def __init__(self, device: str, logger: logging.Logger) -> None:
+        settings = get_settings()
+
         self.__device = device
         self.__logger = logger
+        self.__nemotron_model = settings.NEMOTRON_MODEL
+        self.__pyannote_model = settings.PYANNOTE_MODEL
+        self.__max_speakers = settings.NEMOTRON_MAX_SPEAKERS
         self.__nemotron: Optional[Any] = None
         self.__pyannote: Optional[Any] = None
 
@@ -590,21 +596,21 @@ class Diarizer:
         """
         nemotron_result = None
 
-        if speakers <= nemotron.MAX_SPEAKERS:
+        if speakers <= self.__max_speakers:
             nemotron_result = self.__run_nemotron(audio, sample_rate)
             found = count_speakers(nemotron_result)
 
-            if found < nemotron.MAX_SPEAKERS:
+            if found < self.__max_speakers:
                 return nemotron_result
 
             self.__logger.info(
-                f"Nemotron reached its limit of {nemotron.MAX_SPEAKERS} speakers, "
+                f"Nemotron reached its limit of {self.__max_speakers} speakers, "
                 "so the count may be capped. Diarizing again with pyannote."
             )
         else:
             self.__logger.info(
                 f"{speakers} speakers configured, more than Nemotron's "
-                f"{nemotron.MAX_SPEAKERS}. Skipping it."
+                f"{self.__max_speakers}. Skipping it."
             )
 
         result = self.__run_pyannote(audio, sample_rate, speakers)
@@ -612,9 +618,9 @@ class Diarizer:
         if nemotron_result is not None:
             found = count_speakers(result)
 
-            if found <= nemotron.MAX_SPEAKERS:
+            if found <= self.__max_speakers:
                 self.__logger.info(
-                    f"pyannote did not find more than {nemotron.MAX_SPEAKERS} "
+                    f"pyannote did not find more than {self.__max_speakers} "
                     "speakers. Using the Nemotron result."
                 )
                 return nemotron_result
@@ -625,7 +631,7 @@ class Diarizer:
         self.__logger.info("Diarizing with Nemotron")
 
         if not self.__nemotron:
-            self.__nemotron = nemotron.load_model()
+            self.__nemotron = nemotron.load_model(self.__nemotron_model)
 
         t0 = time.monotonic()
         segments = nemotron.diarize(self.__nemotron, audio, sample_rate)
@@ -640,7 +646,7 @@ class Diarizer:
         self.__logger.info("Diarizing with pyannote")
 
         if not self.__pyannote:
-            self.__pyannote = pyannote.load_pipeline(self.__device)
+            self.__pyannote = pyannote.load_pipeline(self.__pyannote_model, self.__device)
 
         t0 = time.monotonic()
         segments = pyannote.diarize(self.__pyannote, audio, speakers, sample_rate)

@@ -15,9 +15,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+
+# Telemetry stays off. This must be set before huggingface_hub is imported.
+os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+
 import gpustat
 import multiprocessing as mp
-import os
 import psutil
 import requests
 import sys
@@ -30,6 +34,7 @@ from huggingface_hub import snapshot_download
 from random import randint
 from time import sleep
 from typing import Optional
+from utils import nemotron, pyannote
 from utils.args import parse_arguments
 from utils.log import get_fileno, get_logger
 from utils.settings import get_settings
@@ -221,6 +226,34 @@ def drain_create() -> None:
         sys.exit(1)
 
 
+def download_diarization_models() -> None:
+    """
+    Download the diarization models, so that the first job need not wait for
+    them and the worker can run offline.
+    """
+    print(f"Downloading '{settings.NEMOTRON_MODEL}'...")
+    nemotron.download(settings.NEMOTRON_MODEL)
+    print("  Done.")
+
+    # Only the fallback for more than 8 speakers uses pyannote, and its model
+    # is gated, so a missing token or licence is not an error.
+    print(f"Downloading '{settings.PYANNOTE_MODEL}'...")
+
+    if not settings.HF_TOKEN:
+        print("  Skipped: HF_TOKEN is not set. It is only needed for the fallback.")
+        return
+
+    try:
+        pyannote.download(settings.PYANNOTE_MODEL, settings.HF_TOKEN)
+        print("  Done.")
+    except Exception as e:
+        print(
+            f"  Skipped: {e}\n"
+            "  The fallback needs a token whose owner has accepted the licence "
+            f"at https://huggingface.co/{settings.PYANNOTE_MODEL}"
+        )
+
+
 def download_models() -> None:
     """Download all configured whisper models."""
     if settings.HF_TOKEN:
@@ -261,6 +294,8 @@ def download_models() -> None:
             whisper.load_model(model_name, device="cpu")
 
         print("  Done.")
+
+    download_diarization_models()
 
     print("\nAll models downloaded.")
 

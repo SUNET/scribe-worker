@@ -34,19 +34,29 @@ import numpy as np
 os.environ["NEMO_ONE_LOGGER_ENABLED"] = "0"
 os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
 
-MODEL = "nvidia/Nemotron-3-Diarization"
-
-# The model has eight speaker channels, so it can never report more.
-MAX_SPEAKERS = 8
-
 # Sample rate the model expects (the worker decodes to 16 kHz mono).
 SAMPLE_RATE = 16000
 
 
-def load_model() -> Any:
+def download(model: str) -> str:
     """
-    Load the model, using the offline-style streaming configuration (30.4 s
-    input buffer) recommended on the model card.
+    Download the model (a Hugging Face repository name, see NEMOTRON_MODEL in
+    the settings) into the Hugging Face cache, where load_model() finds it, so
+    that the first job does not have to wait for it, or run offline. Only the
+    NeMo checkpoint is fetched: the repository can also hold copies of the
+    model for other runtimes, several hundred MB each. Returns the path of the
+    downloaded files.
+    """
+    from huggingface_hub import snapshot_download
+
+    return snapshot_download(model, allow_patterns=["*.nemo"])
+
+
+def load_model(model: str) -> Any:
+    """
+    Load the model (a Hugging Face repository name, see NEMOTRON_MODEL in the
+    settings), using the offline-style streaming configuration (30.4 s input
+    buffer) recommended on the model card.
     """
     from nemo.collections.asr.models import SortformerEncLabelModel
     from nemo.utils import logging as nemo_logging
@@ -58,16 +68,16 @@ def load_model() -> Any:
 
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
-    model = SortformerEncLabelModel.from_pretrained(MODEL, map_location=device)
-    model.eval()
+    loaded = SortformerEncLabelModel.from_pretrained(model, map_location=device)
+    loaded.eval()
 
-    model.sortformer_modules.chunk_len = 340
-    model.sortformer_modules.chunk_right_context = 40
-    model.sortformer_modules.fifo_len = 40
-    model.sortformer_modules.spkcache_update_period = 300
-    model._check_streaming_parameters()
+    loaded.sortformer_modules.chunk_len = 340
+    loaded.sortformer_modules.chunk_right_context = 40
+    loaded.sortformer_modules.fifo_len = 40
+    loaded.sortformer_modules.spkcache_update_period = 300
+    loaded._check_streaming_parameters()
 
-    return model
+    return loaded
 
 
 @contextmanager

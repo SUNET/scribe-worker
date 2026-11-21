@@ -31,12 +31,26 @@ from typing import Any, Union
 
 import numpy as np
 
-MODEL = "pyannote/speaker-diarization-community-1"
-
 SAMPLE_RATE = 16000
 
 
-def load_pipeline(device: str) -> Any:
+def download(model: str, hf_token: str) -> str:
+    """
+    Download the pipeline (a Hugging Face repository name, see PYANNOTE_MODEL in
+    the settings) into the Hugging Face cache, where load_pipeline() finds it.
+    Needs a token whose owner has accepted the model's licence. Returns the path
+    of the downloaded files.
+    """
+    from huggingface_hub import snapshot_download
+
+    return snapshot_download(
+        model,
+        allow_patterns=["config.yaml", "*.bin", "*.npz"],
+        token=hf_token,
+    )
+
+
+def load_pipeline(model: str, device: str) -> Any:
     """
     Load the pipeline onto device. Needs a Hugging Face token, in the
     HF_TOKEN environment variable, with the model licence accepted.
@@ -55,7 +69,7 @@ def load_pipeline(device: str) -> Any:
 
     set_telemetry_metrics(False)
 
-    return Pipeline.from_pretrained(MODEL, token=os.environ.get("HF_TOKEN")).to(
+    return Pipeline.from_pretrained(model, token=os.environ.get("HF_TOKEN")).to(
         torch.device(device)
     )
 

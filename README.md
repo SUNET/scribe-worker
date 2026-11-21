@@ -69,7 +69,7 @@ uv run main.py --download
 ```
 
 This downloads every Whisper model configured in `utils/settings.py` (`WHISPER_MODELS_HF`),
-and the two diarization models:
+and the two diarization models (`NEMOTRON_MODEL` and `PYANNOTE_MODEL` in the same file):
 
 - Nemotron 3 Diarization (about 200 MB, no token needed).
 - The pyannote pipeline used by the fallback (about 30 MB). It is gated, so it needs `HF_TOKEN`
@@ -98,6 +98,11 @@ WORKERS=2
 # Hugging Face token. Only needed for the pyannote fallback (see below).
 HF_TOKEN=<token>
 
+# Diarization models (these are the defaults, see "Speaker diarization")
+NEMOTRON_MODEL="nvidia/Nemotron-3-Diarization"
+NEMOTRON_MAX_SPEAKERS=8
+PYANNOTE_MODEL="pyannote/speaker-diarization-community-1"
+
 # Client certificate for the backend, if it requires one
 SSL_CERTFILE=<path>
 SSL_KEYFILE=<path>
@@ -121,6 +126,12 @@ engines produce the diarization, and `utils/diarization.py` chooses between them
 | Up to 8 speakers configured, or none (auto) | Nemotron 3 Diarization |
 | More than 8 speakers configured | pyannote (`speaker-diarization-community-1`), with the number as a hint |
 | Nemotron reports 8 speakers, which is its limit and could be a cap | pyannote runs as well. Its result is used only if it finds more than 8, otherwise Nemotron's is kept |
+
+The models and the limit are settings (`NEMOTRON_MODEL`, `PYANNOTE_MODEL` and
+`NEMOTRON_MAX_SPEAKERS` in `utils/settings.py`, shown above with their defaults), and the
+"8" in this section is `NEMOTRON_MAX_SPEAKERS`. `NEMOTRON_MODEL` can be any model that
+NeMo's `SortformerEncLabelModel` loads, as long as `NEMOTRON_MAX_SPEAKERS` is the most speakers
+that model tells apart. Only Nemotron 3 Diarization has been tested.
 
 Things to know:
 

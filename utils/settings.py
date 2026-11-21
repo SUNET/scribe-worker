@@ -46,6 +46,18 @@ class Settings(BaseSettings):
 
     HF_TOKEN: str = ""
 
+    # Diarization models, from Hugging Face. Nemotron runs first and pyannote
+    # is the fallback, so neither is a Whisper model and they are not in
+    # WHISPER_MODELS_HF. NEMOTRON_MODEL can be any model that NeMo's
+    # SortformerEncLabelModel loads, and then NEMOTRON_MAX_SPEAKERS must be the
+    # most speakers that model tells apart (8 for Nemotron 3). A job with more
+    # speakers configured goes straight to pyannote, and so does one where
+    # Nemotron reports that many, since it cannot say "more". PYANNOTE_MODEL is
+    # gated and needs HF_TOKEN, with its licence accepted.
+    NEMOTRON_MODEL: str = "nvidia/Nemotron-3-Diarization"
+    NEMOTRON_MAX_SPEAKERS: int = 8
+    PYANNOTE_MODEL: str = "pyannote/speaker-diarization-community-1"
+
     # Ask whisper-timestamped for a per-word confidence score. Word level
     # timestamps are produced either way; this only controls the score, which
     # costs an extra pass over the decoded tokens. Turn off to trade the
