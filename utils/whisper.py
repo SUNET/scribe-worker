@@ -19,16 +19,19 @@ import io
 import logging
 import numpy as np
 import os
+
+# Telemetry stays off. This must be set before huggingface_hub (pulled in by
+# the imports below) is first imported.
+os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+
 import time
 import torch
-import warnings
 import wave
 import whisper_timestamped as whisper
 
 from huggingface_hub import snapshot_download
-from pyannote.audio import Pipeline
-from pyannote.audio.telemetry import set_telemetry_metrics
 from typing import Optional
+from utils.diarization import Diarizer, align_speakers, count_speakers
 from utils.log import get_logger
 from utils.settings import get_settings
 from utils.words import (
@@ -41,14 +44,11 @@ from utils.words import (
 logger = get_logger()
 settings = get_settings()
 
-warnings.filterwarnings("ignore", module="pyannote")
+# Sample rate for audio passed by path (the worker decodes to 16 kHz mono).
+DIARIZATION_SAMPLE_RATE = 16000
 
 if settings.HF_TOKEN:
     os.environ["HF_TOKEN"] = settings.HF_TOKEN
-
-os.environ["PYANNOTE_METRICS_ENABLED"] = "0"
-
-set_telemetry_metrics(False)
 
 
 def get_torch_device() -> tuple:
@@ -62,21 +62,6 @@ def get_torch_device() -> tuple:
         return "mps", torch.float16
     else:
         return "cpu", torch.float32
-
-
-def diarization_init(hf_token: str) -> Optional[Pipeline]:
-    """
-    Initializes the diarization pipeline using HuggingFace's PyAnnote.
-    Uses the community version for better performance.
-    Returns pipeline.
-    """
-    device, _ = get_torch_device()
-
-    pipeline = Pipeline.from_pretrained(
-        "pyannote/speaker-diarization-community-1", token=hf_token
-    ).to(torch.device(device))
-
-    return pipeline
 
 
 def load_whisper_model(model_name: str, logger: logging.Logger) -> object:
@@ -120,13 +105,10 @@ class WhisperAudioTranscriber:
         model_name: Optional[str] = "base",
         language: Optional[str] = "sv",
         speakers: Optional[int] = 0,
-        hf_token: Optional[str] = None,
-        diarization_object: Optional[Pipeline] = None,
         audio_data: Optional[bytes] = None,
     ) -> None:
         self.__audio_path = audio_path
         self.__audio_data = audio_data
-        self.__hf_token = hf_token
         self.__device, _ = get_torch_device()
 
         if "Northern Sámi" in language:
@@ -137,7 +119,7 @@ class WhisperAudioTranscriber:
         )
         self.__logger = logger
         self.__speakers = speakers
-        self.__diarization_pipeline = diarization_object
+        self.__diarizer = Diarizer(self.__device, logger)
         self.__model = load_whisper_model(model_name, logger)
         self.__decoded_audio = None
         self.__words = []
@@ -260,12 +242,17 @@ class WhisperAudioTranscriber:
                     start_time, end_time, words, first_part
                 )
 
+                # The words follow the cut in time, however it was chosen.
+                first_words = [w for w in words if (w["s"] + w["e"]) / 2 < mid_time]
+                second_words = words[len(first_words) :]
+
                 chunks.append(
                     {
                         "start": start_time,
                         "end": mid_time,
                         "text": first_part,
                         "avg_score": avg_score,
+                        "words": first_words,
                     }
                 )
 
@@ -275,6 +262,7 @@ class WhisperAudioTranscriber:
                         "end": end_time,
                         "text": second_part,
                         "avg_score": avg_score,
+                        "words": second_words,
                     }
                 )
 
@@ -286,6 +274,7 @@ class WhisperAudioTranscriber:
                     "end": end_time,
                     "text": text,
                     "avg_score": avg_score,
+                    "words": words,
                 }
             )
 
@@ -387,29 +376,11 @@ class WhisperAudioTranscriber:
         Perform speaker diarization on the transcribed audio.
         """
 
-        self.__logger.info(f"Starting diarization with speakers={self.__speakers}")
-
-        started = time.monotonic()
-
         speakers = int(self.__speakers)
 
-        match speakers:
-            case 0:
-                min_speakers = None
-                max_speakers = None
-                speakers = None
-            case 1:
-                min_speakers = 1
-                max_speakers = 2
-            case _:
-                min_speakers = speakers - 1
-                max_speakers = speakers + 1
+        self.__logger.info(f"Starting diarization with speakers={speakers}")
 
-        if not self.__diarization_pipeline:
-            self.__diarization_pipeline = diarization_init(self.__hf_token)
-
-        if not self.__diarization_pipeline:
-            raise Exception("Diarization pipeline is not available.")
+        started = time.monotonic()
 
         if self.__chunks is None:
             raise Exception(
@@ -417,22 +388,18 @@ class WhisperAudioTranscriber:
             )
 
         if self.__audio_data:
-            audio_array, sample_rate = self.__get_decoded_audio()
-            waveform = torch.from_numpy(audio_array).unsqueeze(0)
-            audio_input = {"waveform": waveform, "sample_rate": sample_rate}
+            audio, sample_rate = self.__get_decoded_audio()
         else:
-            audio_input = self.__audio_path
+            audio, sample_rate = self.__audio_path, DIARIZATION_SAMPLE_RATE
 
-        t0 = time.monotonic()
-        diarization = self.__diarization_pipeline(
-            audio_input,
-            num_speakers=int(self.__speakers),
-            min_speakers=min_speakers,
-            max_speakers=max_speakers,
+        diarization = self.__diarizer.diarize(audio, sample_rate, speakers)
+
+        aligned_segments = align_speakers(
+            self.__chunks,
+            diarization,
+            audio if isinstance(audio, np.ndarray) else None,
+            sample_rate,
         )
-        self.__logger.debug(f"Diarization inference took {time.monotonic() - t0:.2f}s")
-
-        aligned_segments = self.__align_speakers(self.__chunks, diarization)
 
         self.__logger.info(
             f"Diarization completed, took {time.monotonic() - started:.2f}s"
@@ -441,80 +408,8 @@ class WhisperAudioTranscriber:
         return {
             "full_transcription": self.__full_transcription,
             "segments": aligned_segments,
-            "speaker_count": int(len(list(diarization.speaker_diarization.labels())))
-            if diarization
-            else 0,
+            "speaker_count": count_speakers(diarization),
         }
-
-    def __align_speakers(self, transcription_chunks, diarization) -> list:
-        """
-        Align transcription chunks with speaker diarization results.
-        """
-        aligned_segments = []
-
-        for chunk in transcription_chunks:
-            chunk_start = chunk["start"]
-            chunk_end = chunk["end"]
-            chunk_text = chunk["text"]
-            avg_score = chunk.get("avg_score")
-
-            chunk_middle = (chunk_start + chunk_end) / 2
-            dominant_speaker = self.__get_speaker(diarization, chunk_middle)
-            active_speakers = self.__get_speakers_in_range(
-                diarization, chunk_start, chunk_end
-            )
-
-            segment = {
-                "start": float(chunk_start),
-                "end": float(chunk_end),
-                "text": chunk_text.strip(),
-                "speaker": dominant_speaker,
-                "active_speakers": active_speakers,
-                "duration": float(chunk_end - chunk_start),
-            }
-
-            if avg_score is not None:
-                segment["avg_score"] = avg_score
-
-            aligned_segments.append(segment)
-
-        return aligned_segments
-
-    def __normalize_speaker_name(self, speaker: str) -> str:
-        """
-        Normalize speaker names to a consistent format (Speaker_00, Speaker_01, etc).
-        """
-        if speaker.startswith("SPEAKER_"):
-            num = speaker.replace("SPEAKER_", "")
-            return f"Speaker_{num}"
-        return speaker
-
-    def __get_speaker(self, diarization, time_point) -> str:
-        """
-        Get the speaker label for a specific time point in the diarization.
-        """
-        for segment, _, speaker in diarization.speaker_diarization.itertracks(
-            yield_label=True
-        ):
-            if segment.start <= time_point <= segment.end:
-                return self.__normalize_speaker_name(speaker)
-
-        return "Speaker_00"
-
-    def __get_speakers_in_range(self, diarization, start_time, end_time) -> list:
-        """
-        Get a list of active speakers within a specific time range in the
-        diarization.
-        """
-        active_speakers = set()
-
-        for segment, _, speaker in diarization.speaker_diarization.itertracks(
-            yield_label=True
-        ):
-            if not (segment.end < start_time or segment.start > end_time):
-                active_speakers.add(self.__normalize_speaker_name(speaker))
-
-        return list(active_speakers)
 
     def subtitles(self) -> str:
         """
