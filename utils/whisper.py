@@ -31,7 +31,12 @@ import whisper_timestamped as whisper
 
 from huggingface_hub import snapshot_download
 from typing import Optional
-from utils.diarization import Diarizer, align_speakers, count_speakers
+from utils.diarization import (
+    Diarizer,
+    align_speakers,
+    count_speakers,
+    serialize_diarization,
+)
 from utils.log import get_logger
 from utils.settings import get_settings
 from utils.words import (
@@ -408,6 +413,7 @@ class WhisperAudioTranscriber:
         return {
             "full_transcription": self.__full_transcription,
             "segments": aligned_segments,
+            "diarization_segments": serialize_diarization(diarization),
             "speaker_count": count_speakers(diarization),
         }
 
