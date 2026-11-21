@@ -16,7 +16,6 @@
 # limitations under the License.
 
 import io
-import json
 import logging
 import numpy as np
 import os
@@ -402,8 +401,6 @@ class WhisperAudioTranscriber:
             sample_rate,
         )
 
-        self.__dump_alignment(speakers, diarization, aligned_segments)
-
         self.__logger.info(
             f"Diarization completed, took {time.monotonic() - started:.2f}s"
         )
@@ -413,39 +410,6 @@ class WhisperAudioTranscriber:
             "segments": aligned_segments,
             "speaker_count": count_speakers(diarization),
         }
-
-    def __dump_alignment(self, speakers, diarization, aligned_segments) -> None:
-        """
-        Debugging aid, off unless SCRIBE_ALIGN_DUMP_DIR is set: save what the
-        speaker alignment worked from and produced, to replay it elsewhere.
-        The file holds the transcript, so it is readable by the worker's user
-        only, and never goes to the log. Never fails the job.
-        """
-        directory = os.environ.get("SCRIBE_ALIGN_DUMP_DIR")
-
-        if not directory:
-            return
-
-        try:
-            os.makedirs(directory, mode=0o700, exist_ok=True)
-            path = os.path.join(
-                directory, f"align-{int(time.time())}-{os.getpid()}.json"
-            )
-
-            with open(os.open(path, os.O_WRONLY | os.O_CREAT, 0o600), "w") as f:
-                json.dump(
-                    {
-                        "speakers": speakers,
-                        "chunks": self.__chunks,
-                        "diarization": diarization,
-                        "segments": aligned_segments,
-                    },
-                    f,
-                )
-
-            self.__logger.info(f"Saved the alignment input to {path}")
-        except Exception as e:
-            self.__logger.warning(f"Could not save the alignment input: {e}")
 
     def subtitles(self) -> str:
         """
