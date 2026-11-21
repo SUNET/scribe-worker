@@ -25,6 +25,7 @@ RUN uv sync --frozen --no-dev
 # Copy application files
 COPY main.py .
 COPY utils/ utils/
+COPY scripts/ scripts/
 
 # Run worker
 CMD ["uv", "run", "python", "main.py", "--foreground", "--debug", "--no-healthcheck"]

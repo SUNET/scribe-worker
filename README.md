@@ -188,6 +188,50 @@ docker run --env-file .env scribe-worker
 
 The image installs `ffmpeg`, `git`, `gcc` and `libsndfile1`, which the dependencies above need.
 
+## Evaluating transcription quality
+
+`scripts/eval.py` measures how good the transcriptions are, so that a change can be kept or
+reverted on evidence. It transcribes test recordings with the model and settings that the worker
+uses, scores them against known text, and compares the result with a stored baseline.
+
+The test data is built from [FLEURS](https://huggingface.co/datasets/google/fleurs) (CC-BY-4.0):
+clean clips with reference text, joined into long recordings with noise-only stretches between
+them, and mixed with noise at several levels. A `dev` split is for tuning and a `test` split is
+held out. Words that Whisper writes in the noise-only stretches are counted as invented, which
+measures hallucination. For Swedish, numbers are compared as words, so "19" and "nitton" agree.
+
+On a production machine, stop the worker first, since a busy GPU makes the speed numbers
+meaningless, then:
+
+```bash
+# Once. Downloads FLEURS (about 600 MB, cached) and builds the recordings.
+# Give it a music or room recording: pink noise rarely makes Whisper invent text.
+EVAL_NOISE=/path/to/music.mp3 scripts/eval.sh prepare
+
+scripts/eval.sh                    # run, and compare with the baseline
+scripts/eval.sh promote            # accept the last run as the new baseline
+scripts/eval.sh run --splits dev   # quick run while tuning
+```
+
+With Docker, mount a data directory so that the data and results survive the container:
+
+```bash
+docker run --rm --gpus all --env-file .env -v "$PWD/eval-data:/app/eval-data" scribe-worker \
+    uv run python scripts/eval.py run
+```
+
+`run` exits with status 1 when the WER on a held-out split (`test`, `real`) or the number of
+invented words gets worse than the limits (`--max-wer-increase`, `--max-invented-increase`), so it
+can run as a check before a release. Try a change without editing the code with
+`--set beam_size=5 --set best_of=5`, or `--variant old` for decoding without the temperature
+fallback and the hallucination filter. Your own recordings, each with a corrected `NAME.txt`
+next to it, go in a folder given as `EVAL_REAL` (or `--real`): they are the most telling data
+there is. Results are written to `eval-data/<language>/results/`. Run
+`uv run python scripts/test_evallib.py` to check the scoring code itself.
+
+`scripts/benchmark_clips.py` transcribes FLEURS clips one by one, for looking at single clips,
+and `scripts/compare_decoding.py` compares decoding settings on one recording.
+
 ## Project Structure
 
 ```
@@ -204,6 +248,7 @@ scribe-worker/
 │   ├── words.py         # The per-word timing payload
 │   ├── media.py         # FFmpeg helpers
 │   └── log.py           # Logging
+├── scripts/             # Evaluation: eval.py, eval.sh, benchmarks
 ├── models/              # Whisper model files
 └── downloaded/          # Downloaded files for processing
 ```
