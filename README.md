@@ -160,6 +160,11 @@ speaker at the middle of each segment:
 The tolerances are constants at the top of `utils/diarization.py`, with comments on why each has
 the value it has. They come from a few real recordings and may need tuning on others.
 
+The `txt` JSON result also includes `diarization_segments`: the raw `{"start", "end", "speaker"}`
+intervals returned by whichever diarization engine ran (Nemotron or pyannote), before alignment to
+transcript chunks. This preserves overlapping speech, full timestamp precision, and speaker turns
+without transcribed words for downstream consumers.
+
 ### Privacy
 
 Audio and transcripts stay on the worker. Only the backend API is contacted with them, and the
