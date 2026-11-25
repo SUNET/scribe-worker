@@ -159,3 +159,90 @@ def split_index_for_text(words: list, first_part: str) -> Optional[int]:
         return None
 
     return count
+
+
+# What a split point is worth, against how far it is from the middle of the
+# segment (0 on the middle, 0.5 at either end). A sentence end beats a comma,
+# and a pause beats both once it is long enough.
+SENTENCE_BONUS = 0.3
+CLAUSE_BONUS = 0.15
+PAUSE_BONUS_PER_SECOND = 0.3
+PAUSE_BONUS_MAX = 0.3
+CLAUSE_MARKS = (",", ";", ":", "–", "—")
+SENTENCE_MARKS = (".", "?", "!", "…")
+
+# Neither half of a split may be shorter than this share of the text.
+MIN_SPLIT_SHARE = 0.25
+
+
+def _ends_with(text: str, marks: tuple) -> bool:
+    return text.rstrip("\"')]}»”’").endswith(marks)
+
+
+def split_ranges(
+    words: list, max_chars: int, pause: float, _lo: int = 0, _hi: Optional[int] = None
+) -> list:
+    """
+    Cut a segment's words into (first, last + 1) index ranges, for captions.
+
+    A pause of at least ``pause`` seconds between two words is always a cut.
+    A piece still longer than ``max_chars`` is cut in two at the best word
+    boundary near its middle: one after a sentence end, then a comma, then a
+    longer pause, over a cut that merely lands on the middle. Pieces are cut
+    again until they fit, or have no boundary left to cut at.
+    """
+
+    hi = len(words) if _hi is None else _hi
+
+    # Long pauses first, since they are real breaks in the speech.
+    cuts = [
+        i for i in range(_lo + 1, hi) if words[i]["s"] - words[i - 1]["e"] >= pause
+    ]
+
+    if cuts:
+        bounds = [_lo] + cuts + [hi]
+        ranges = []
+
+        for a, b in zip(bounds, bounds[1:]):
+            ranges.extend(split_ranges(words, max_chars, float("inf"), a, b))
+
+        return ranges
+
+    sizes = [len(word["t"]) + 1 for word in words[_lo:hi]]
+    total = sum(sizes)
+
+    if total - 1 <= max_chars or hi - _lo < 2:
+        return [(_lo, hi)]
+
+    best = None
+    before = 0
+
+    for i in range(_lo + 1, hi):
+        before += sizes[i - 1 - _lo]
+        share = before / total
+
+        if not MIN_SPLIT_SHARE <= share <= 1 - MIN_SPLIT_SHARE:
+            continue
+
+        text = words[i - 1]["t"]
+        cost = abs(share - 0.5)
+
+        if _ends_with(text, SENTENCE_MARKS):
+            cost -= SENTENCE_BONUS
+        elif _ends_with(text, CLAUSE_MARKS):
+            cost -= CLAUSE_BONUS
+
+        gap = max(0.0, words[i]["s"] - words[i - 1]["e"])
+        cost -= min(gap * PAUSE_BONUS_PER_SECOND, PAUSE_BONUS_MAX)
+
+        if best is None or cost < best[0]:
+            best = (cost, i)
+
+    if best is None:
+        return [(_lo, hi)]
+
+    # A pause was already handled above, so recursion here only has the
+    # length to deal with.
+    return split_ranges(words, max_chars, float("inf"), _lo, best[1]) + split_ranges(
+        words, max_chars, float("inf"), best[1], hi
+    )

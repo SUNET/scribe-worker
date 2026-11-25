@@ -34,11 +34,13 @@ from typing import Optional
 from utils.diarization import Diarizer, align_speakers, count_speakers
 from utils.log import get_logger
 from utils.settings import get_settings
+from utils.subtitle_timing import retime, snap_to_words
 from utils.words import (
     average_confidence,
     build_payload,
     normalize_words,
     split_index_for_text,
+    split_ranges,
 )
 
 logger = get_logger()
@@ -236,6 +238,54 @@ class WhisperAudioTranscriber:
 
             avg_score = average_confidence(words)
 
+            # With word timings that match the text, cut at sentence ends,
+            # clauses and long pauses, as many times as the length needs.
+            text_words = text.split()
+
+            if words and len(words) == len(text_words):
+                ranges = split_ranges(
+                    words,
+                    settings.SEGMENT_SPLIT_LENGTH,
+                    settings.SEGMENT_SPLIT_PAUSE,
+                )
+
+                if len(ranges) > 1:
+                    for number, (first, last) in enumerate(ranges):
+                        piece_words = words[first:last]
+
+                        # Midway through the silence between two pieces.
+                        piece_start = (
+                            start_time
+                            if number == 0
+                            else (words[first - 1]["e"] + words[first]["s"]) / 2
+                        )
+                        piece_end = (
+                            end_time
+                            if last == len(words)
+                            else (words[last - 1]["e"] + words[last]["s"]) / 2
+                        )
+
+                        # Words stamped out of order must not turn a piece
+                        # inside out.
+                        piece_start = min(max(piece_start, start_time), end_time)
+                        piece_end = min(max(piece_end, piece_start), end_time)
+
+                        chunks.append(
+                            {
+                                "start": piece_start,
+                                "end": piece_end,
+                                "text": " ".join(text_words[first:last]),
+                                "avg_score": (
+                                    average_confidence(piece_words)
+                                    if any("c" in w for w in piece_words)
+                                    else avg_score
+                                ),
+                                "words": piece_words,
+                            }
+                        )
+
+                    continue
+
             if len(text) > settings.SEGMENT_SPLIT_LENGTH:
                 first_part, second_part = self.__split_text(text)
                 mid_time = self.__segment_split_time(
@@ -302,7 +352,7 @@ class WhisperAudioTranscriber:
                 condition_on_previous_text=False,
                 fp16=self.__device != "cpu",
                 compute_word_confidence=settings.WORD_CONFIDENCE,
-                refine_whisper_precision=0,
+                refine_whisper_precision=settings.WHISPER_REFINE_PRECISION,
                 trust_whisper_timestamps=True,
                 verbose=None,
                 beam_size=3,
@@ -322,7 +372,7 @@ class WhisperAudioTranscriber:
                 condition_on_previous_text=False,
                 fp16=self.__device != "cpu",
                 compute_word_confidence=settings.WORD_CONFIDENCE,
-                refine_whisper_precision=0,
+                refine_whisper_precision=settings.WHISPER_REFINE_PRECISION,
                 trust_whisper_timestamps=True,
                 verbose=None,
             )
@@ -422,8 +472,13 @@ class WhisperAudioTranscriber:
 
         # (start, end, caption), in seconds. SRT timestamps are formatted once
         # at the end, so there is only ever one representation of an instant.
+        # Times are snapped to the first and last word, which are tighter than
+        # the segment boundaries.
         entries = [
-            (chunk["start"], chunk["end"], self.__caption_split(chunk["text"].strip()))
+            (
+                *snap_to_words(chunk["start"], chunk["end"], chunk["words"]),
+                self.__caption_split(chunk["text"].strip()),
+            )
             for chunk in self.__chunks
             if chunk["text"].strip()
         ]
@@ -454,7 +509,7 @@ class WhisperAudioTranscriber:
             f"{self.__seconds_to_srt_time(start)} --> "
             f"{self.__seconds_to_srt_time(end)}\n"
             f"{caption}\n\n"
-            for number, (start, end, caption) in enumerate(merged, start=1)
+            for number, (start, end, caption) in enumerate(retime(merged), start=1)
         )
 
     def __caption_split(self, caption) -> str:

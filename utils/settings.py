@@ -73,9 +73,31 @@ class Settings(BaseSettings):
     # boundary when word timings are available.
     SEGMENT_SPLIT_LENGTH: int = 90
 
+    # A silence of at least this many seconds between two words always ends a
+    # caption, whatever the length. Keep it at SUBTITLE_MERGE_GAP or above, or
+    # the cut is merged straight back into one subtitle.
+    SEGMENT_SPLIT_PAUSE: float = 1.8
+
+    # How far whisper-timestamped may move segment boundaries when it refines
+    # them, in seconds (a multiple of 0.02). 0 keeps Whisper's own. Refining
+    # can tighten timestamps on clean audio but costs time, so measure it on
+    # real recordings before raising it.
+    WHISPER_REFINE_PRECISION: float = 0.0
+
     # Two consecutive one-line captions are merged into one two-line subtitle
     # when the silence between them is shorter than this, in seconds.
     SUBTITLE_MERGE_GAP: float = 1.8
+
+    # Subtitle timing, in seconds. A cue starts SUBTITLE_LEAD_IN before its
+    # first word and stays up SUBTITLE_LEAD_OUT after its last. It is held at
+    # least SUBTITLE_MIN_DURATION, and long enough to read at SUBTITLE_MAX_CPS
+    # characters per second, when the next cue leaves room. Consecutive cues
+    # are kept SUBTITLE_MIN_GAP apart.
+    SUBTITLE_LEAD_IN: float = 0.1
+    SUBTITLE_LEAD_OUT: float = 0.3
+    SUBTITLE_MIN_DURATION: float = 1.0
+    SUBTITLE_MAX_CPS: float = 17.0
+    SUBTITLE_MIN_GAP: float = 0.08
 
     # SSL configuration
     SSL_CERTFILE: str = ""
