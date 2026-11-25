@@ -35,7 +35,7 @@ from utils.diarization import Diarizer, align_speakers, count_speakers
 from utils.log import get_logger
 from utils.settings import get_settings
 from utils.subtitle_text import build_cues, merge_cues
-from utils.subtitle_timing import retime
+from utils.subtitle_timing import retime, too_fast
 from utils.words import (
     average_confidence,
     build_payload,
@@ -490,10 +490,19 @@ class WhisperAudioTranscriber:
 
         cues = merge_cues(build_cues(source))
 
+        timed = retime(cues)
+        fast = too_fast(timed)
+
+        if fast:
+            self.__logger.info(
+                f"{len(fast)} of {len(timed)} subtitles are read faster than "
+                f"{settings.SUBTITLE_MAX_CPS:g} characters per second"
+            )
+
         return "".join(
             f"{number}\n"
             f"{self.__seconds_to_srt_time(cue.start)} --> "
             f"{self.__seconds_to_srt_time(cue.end)}\n"
             f"{cue.caption}\n\n"
-            for number, cue in enumerate(retime(cues), start=1)
+            for number, cue in enumerate(timed, start=1)
         )

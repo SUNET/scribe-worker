@@ -65,7 +65,7 @@ class Settings(BaseSettings):
     WORD_CONFIDENCE: bool = True
 
     # Subtitle shaping. SUBTITLE_LINE_LENGTH should match CHARACTER_LIMIT in
-    # transcribe-ui: the worker wraps captions at it, the editor flags lines
+    # scribe-ui: the worker wraps captions at it, the editor flags lines
     # that exceed it, and they will disagree visibly if they drift apart.
     SUBTITLE_LINE_LENGTH: int = 42
 
@@ -96,9 +96,11 @@ class Settings(BaseSettings):
     SUBTITLE_SPEAKER_DASHES: bool = True
     SUBTITLE_SPEAKER_DASH: str = "- "
 
-    # Subtitle timing, in seconds. The defaults follow the Netflix timed text
-    # style guide: 20 characters per second for adults, a cue between 5/6 s
-    # and 7 s, and 2 frames (at 24 fps) between cues. A cue starts
+    # Subtitle timing, in seconds. The limits follow the Netflix timed text
+    # style guide, except the reading speed, which is the 18 characters per
+    # second scribe-ui flags in "Validate" (MAX_CHARS_PER_SECOND there; keep
+    # the two the same): a cue between 5/6 s and 7 s, and 2 frames (at 24 fps)
+    # between cues. A cue starts
     # SUBTITLE_LEAD_IN before its first word and stays up SUBTITLE_LEAD_OUT
     # after its last. It is held at least SUBTITLE_MIN_DURATION, and long
     # enough to read at SUBTITLE_MAX_CPS when the next cue leaves room, but
@@ -107,7 +109,7 @@ class Settings(BaseSettings):
     SUBTITLE_LEAD_IN: float = 0.1
     SUBTITLE_LEAD_OUT: float = 0.3
     SUBTITLE_MIN_DURATION: float = 0.833
-    SUBTITLE_MAX_CPS: float = 20.0
+    SUBTITLE_MAX_CPS: float = 18.0
     SUBTITLE_MAX_DURATION: float = 7.0
     SUBTITLE_MIN_GAP: float = 0.08
 

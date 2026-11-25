@@ -47,6 +47,30 @@ class Cue(NamedTuple):
 MIN_CUE_SECONDS = 0.2
 
 
+def characters(caption: str) -> int:
+    """
+    Characters that are read, counted the way scribe-ui does: spaces and
+    punctuation count, the line break does not.
+    """
+
+    return len(caption.replace("\n", ""))
+
+
+def too_fast(cues: list) -> list:
+    """
+    The cues that are read faster than SUBTITLE_MAX_CPS. Holding a cue longer
+    cannot help when the next one is in the way, or the speech is itself too
+    fast, so some will remain.
+    """
+
+    return [
+        cue
+        for cue in cues
+        if cue.end > cue.start
+        and characters(cue.caption) / (cue.end - cue.start) > settings.SUBTITLE_MAX_CPS
+    ]
+
+
 def retime(cues: list) -> list:
     """
     Adjust cues for display.
@@ -71,8 +95,7 @@ def retime(cues: list) -> list:
 
         # Hold the cue long enough to read, but never past the original end
         # padded by the lead-out unless reading time demands it.
-        characters = len(caption.replace("\n", " "))
-        reading_time = characters / settings.SUBTITLE_MAX_CPS
+        reading_time = characters(caption) / settings.SUBTITLE_MAX_CPS
         wanted = max(
             end + settings.SUBTITLE_LEAD_OUT,
             new_start + settings.SUBTITLE_MIN_DURATION,

@@ -5,7 +5,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from utils.settings import get_settings
 from utils.subtitle_text import build_cues, merge_cues, wrap_caption
-from utils.subtitle_timing import Cue, retime
+from utils.subtitle_timing import Cue, characters, retime, too_fast
 
 settings = get_settings()
 LINE = settings.SUBTITLE_LINE_LENGTH
@@ -110,3 +110,16 @@ def test_dashes_count_toward_line_length():
 def test_speaker_survives_build_cues():
     piece = dict(chunk("Hej på dig"), speaker="SPEAKER_1")
     assert build_cues([piece])[0].speaker == "SPEAKER_1"
+
+
+def test_cue_is_held_long_enough_to_read():
+    text = "x" * 30 + "\n" + "y" * 30
+    [cue] = retime([Cue(1.0, 1.5, text)])
+    assert characters(text) == 60
+    assert (cue.end - cue.start) * settings.SUBTITLE_MAX_CPS >= 60
+    assert not too_fast([cue])
+
+
+def test_too_fast_when_next_cue_is_in_the_way():
+    cues = [Cue(1.0, 1.5, "x" * 40), Cue(1.6, 3.0, "ok")]
+    assert too_fast(retime(cues))
