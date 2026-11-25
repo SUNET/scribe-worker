@@ -5,7 +5,7 @@ Copyright (c) 2025-2026 Vetenskapsrådet / Sunet
 This component is part of Sunet Scribe, a modular speech-to-text
 platform developed for the Swedish higher education and research sector.
 
-This component uses or depends on third-party open source software,
+This component uses or depends on third-party software,
 frameworks and machine learning models.
 
 Third-party Notices:
@@ -25,6 +25,11 @@ pyannote.audio
 Copyright (c) 2020 CNRS
 Licensed under the MIT License
 https://github.com/pyannote/pyannote-audio
+
+NVIDIA Nemotron 3 Diarization
+Developed by NVIDIA
+Licensed under the OpenMDW License Agreement, version 1.1
+https://huggingface.co/nvidia/Nemotron-3-Diarization
 
 FFmpeg
 Licensed under the GNU Lesser General Public License v2.1 or later (LGPL v2.1+).
