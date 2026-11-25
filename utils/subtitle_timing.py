@@ -21,45 +21,35 @@ Timing for subtitle cues.
 Whisper segment boundaries are loose: they often begin inside the silence
 before speech and end well after it, and a cut made mid-segment inherits the
 previous half's end. Word timings are much tighter, so cues are first snapped
-to them, and then adjusted to what a viewer needs: a short lead-in, enough
+to them (see subtitle_text), and then adjusted to what a viewer needs: a short lead-in, enough
 on-screen time to read the text, and no overlap with the next cue.
 """
 
-from typing import Optional
+from typing import NamedTuple, Optional
 
 from utils.settings import get_settings
 
 settings = get_settings()
 
+
+class Cue(NamedTuple):
+    """
+    One subtitle: when it is shown, what it says and, when diarization ran,
+    who says it. Times are in seconds.
+    """
+
+    start: float
+    end: float
+    caption: str
+    speaker: Optional[str] = None
+
 # A cue is never shorter than this, whatever the settings say.
 MIN_CUE_SECONDS = 0.2
 
 
-def snap_to_words(
-    start: float, end: float, words: Optional[list]
-) -> tuple[float, float]:
+def retime(cues: list) -> list:
     """
-    Tighten a segment's (start, end) to its first and last word.
-
-    Falls back to the segment times when there are no words, or when the word
-    times are unusable (not increasing).
-    """
-
-    if not words:
-        return start, end
-
-    word_start = words[0]["s"]
-    word_end = words[-1]["e"]
-
-    if word_end <= word_start:
-        return start, end
-
-    return word_start, word_end
-
-
-def retime(cues: list[tuple[float, float, str]]) -> list[tuple[float, float, str]]:
-    """
-    Adjust (start, end, caption) cues for display.
+    Adjust cues for display.
 
     Each cue starts slightly before its first word and stays up slightly after
     its last, is held long enough to read at SUBTITLE_MAX_CPS, and never
@@ -70,8 +60,9 @@ def retime(cues: list[tuple[float, float, str]]) -> list[tuple[float, float, str
     retimed = []
     previous_end = None
 
-    for index, (start, end, caption) in enumerate(cues):
-        next_start = cues[index + 1][0] if index + 1 < len(cues) else None
+    for index, cue in enumerate(cues):
+        start, end, caption = cue.start, cue.end, cue.caption
+        next_start = cues[index + 1].start if index + 1 < len(cues) else None
 
         new_start = max(0.0, start - settings.SUBTITLE_LEAD_IN)
 
@@ -87,6 +78,7 @@ def retime(cues: list[tuple[float, float, str]]) -> list[tuple[float, float, str
             new_start + settings.SUBTITLE_MIN_DURATION,
             new_start + reading_time,
         )
+        wanted = min(wanted, new_start + settings.SUBTITLE_MAX_DURATION)
 
         # Extra time is a courtesy and gives way to the next cue. The words
         # themselves are not shortened.
@@ -95,7 +87,7 @@ def retime(cues: list[tuple[float, float, str]]) -> list[tuple[float, float, str
 
         new_end = max(wanted, new_start + MIN_CUE_SECONDS)
 
-        retimed.append((new_start, new_end, caption))
+        retimed.append(cue._replace(start=new_start, end=new_end))
         previous_end = new_end
 
     return retimed

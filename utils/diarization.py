@@ -391,7 +391,9 @@ def _start_at_onset(
     return max(start, earliest)
 
 
-def _piece(chunk: dict, timeline: SpeakerTimeline, start, end, speaker, text, score):
+def _piece(
+    chunk: dict, timeline: SpeakerTimeline, start, end, speaker, text, score, words
+):
     piece = {
         "start": float(start),
         "end": float(end),
@@ -399,6 +401,8 @@ def _piece(chunk: dict, timeline: SpeakerTimeline, start, end, speaker, text, sc
         "speaker": speaker,
         "active_speakers": timeline.speakers_between(start, end),
         "duration": float(end - start),
+        # Internal: what subtitles are cut from. Not part of the uploaded JSON.
+        "words": words or [],
     }
 
     if score is not None:
@@ -499,6 +503,7 @@ def align_speakers(
                     speaker,
                     chunk["text"],
                     score,
+                    None,
                 )
             )
             continue
@@ -526,6 +531,7 @@ def align_speakers(
                     speaker,
                     chunk["text"],
                     score,
+                    words,
                 )
             )
             continue
@@ -557,6 +563,7 @@ def align_speakers(
                     speaker,
                     " ".join(word["t"] for word in piece_words),
                     average_confidence(piece_words),
+                    piece_words,
                 )
             )
 

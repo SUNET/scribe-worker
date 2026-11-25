@@ -34,7 +34,8 @@ from typing import Optional
 from utils.diarization import Diarizer, align_speakers, count_speakers
 from utils.log import get_logger
 from utils.settings import get_settings
-from utils.subtitle_timing import retime, snap_to_words
+from utils.subtitle_text import build_cues, merge_cues
+from utils.subtitle_timing import retime
 from utils.words import (
     average_confidence,
     build_payload,
@@ -130,6 +131,8 @@ class WhisperAudioTranscriber:
         # None until __process_transcription has run; an empty list is a
         # legitimate result for silent audio, so the two must stay distinct.
         self.__chunks = None
+        # Diarized pieces, with their words, once diarization() has run.
+        self.__aligned = None
 
     def __decode_wav_bytes(self, wav_bytes: bytes) -> tuple:
         """
@@ -168,11 +171,12 @@ class WhisperAudioTranscriber:
         Convert seconds (float or string) to SRT timestamp format
         (HH:MM:SS,mmm).
         """
-        seconds = float(seconds)
-        millis = int(round((seconds % 1) * 1000))
-        total_seconds = int(seconds)
-        hours, remainder = divmod(total_seconds, 3600)
-        minutes, secs = divmod(remainder, 60)
+        # Round once, on the whole time: rounding the fraction on its own
+        # can give 1000 milliseconds.
+        total_millis = max(0, int(round(float(seconds) * 1000)))
+        hours, remainder = divmod(total_millis, 3_600_000)
+        minutes, remainder = divmod(remainder, 60_000)
+        secs, millis = divmod(remainder, 1000)
         return f"{hours:02}:{minutes:02}:{secs:02},{millis:03}"
 
     def __segment_split_time(
@@ -455,9 +459,15 @@ class WhisperAudioTranscriber:
             f"Diarization completed, took {time.monotonic() - started:.2f}s"
         )
 
+        self.__aligned = aligned_segments
+
         return {
             "full_transcription": self.__full_transcription,
-            "segments": aligned_segments,
+            # The words are for subtitles; the upload keeps its own shape.
+            "segments": [
+                {key: value for key, value in segment.items() if key != "words"}
+                for segment in aligned_segments
+            ],
             "speaker_count": count_speakers(diarization),
         }
 
@@ -470,75 +480,20 @@ class WhisperAudioTranscriber:
                 "Transcription result is not available. Please transcribe first."
             )
 
-        # (start, end, caption), in seconds. SRT timestamps are formatted once
-        # at the end, so there is only ever one representation of an instant.
-        # Times are snapped to the first and last word, which are tighter than
-        # the segment boundaries.
-        entries = [
-            (
-                *snap_to_words(chunk["start"], chunk["end"], chunk["words"]),
-                self.__caption_split(chunk["text"].strip()),
-            )
-            for chunk in self.__chunks
-            if chunk["text"].strip()
-        ]
+        # Cut from the diarized pieces when there are any, so a cue never
+        # runs across a change of speaker, and the dashes know who is who.
+        source = (
+            self.__aligned
+            if self.__aligned is not None and settings.SUBTITLE_SPEAKER_DASHES
+            else self.__chunks
+        )
 
-        # Merge a pair of consecutive single-line captions into one two-line
-        # subtitle, when the silence between them is short enough.
-        merged = []
-        index = 0
-
-        while index < len(entries):
-            start, end, caption = entries[index]
-            following = entries[index + 1] if index + 1 < len(entries) else None
-
-            if (
-                following is not None
-                and "\n" not in caption
-                and "\n" not in following[2]
-                and following[0] - end < settings.SUBTITLE_MERGE_GAP
-            ):
-                merged.append((start, following[1], f"{caption}\n{following[2]}"))
-                index += 2
-            else:
-                merged.append((start, end, caption))
-                index += 1
+        cues = merge_cues(build_cues(source))
 
         return "".join(
             f"{number}\n"
-            f"{self.__seconds_to_srt_time(start)} --> "
-            f"{self.__seconds_to_srt_time(end)}\n"
-            f"{caption}\n\n"
-            for number, (start, end, caption) in enumerate(retime(merged), start=1)
+            f"{self.__seconds_to_srt_time(cue.start)} --> "
+            f"{self.__seconds_to_srt_time(cue.end)}\n"
+            f"{cue.caption}\n\n"
+            for number, cue in enumerate(retime(cues), start=1)
         )
-
-    def __caption_split(self, caption) -> str:
-        """
-        Split a caption into two parts if it exceeds a certain length.
-        """
-        if len(caption) < settings.SUBTITLE_LINE_LENGTH:
-            return f"{caption}"
-
-        current_position = len(caption) // 2
-
-        if current_position >= len(caption):
-            current_position = len(caption) - 1
-
-        characater = caption[current_position]
-
-        while characater != " ":
-            if current_position == 0 or len(caption) <= current_position:
-                break
-
-            characater = caption[current_position]
-            current_position -= 1
-
-        first_line = caption[: current_position + 1].strip()
-        second_line = caption[current_position + 1 :].strip()
-
-        if len(first_line) <= 1 or len(second_line) <= 1:
-            return caption
-
-        new_caption = f"{first_line}\n{second_line}"
-
-        return new_caption

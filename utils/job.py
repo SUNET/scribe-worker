@@ -78,17 +78,26 @@ def _transcribe_worker(
         return
 
     result_dict["transcribed_seconds"] = transcribed_seconds
+
+    # A transcript needs diarization. Subtitles use it for speaker dashes, but
+    # can do without, so a failure there must not fail the job, and a job
+    # with a single speaker has nobody to tell apart.
+    drz = None
+
+    if output_format == "txt":
+        drz = transcriber.diarization()
+    elif settings.SUBTITLE_SPEAKER_DASHES and int(speakers or 0) != 1:
+        try:
+            transcriber.diarization()
+        except Exception:
+            log.exception("Diarization for subtitles failed, no speaker dashes")
+
     result_dict["srt_data"] = transcriber.subtitles()
 
     # Word timings apply to subtitles and transcriptions alike, so they are
     # collected regardless of the requested output format.
     result_dict["words_data"] = transcriber.words()
-
-    if output_format == "txt":
-        drz = transcriber.diarization()
-        result_dict["json_data"] = drz if drz else None
-    else:
-        result_dict["json_data"] = None
+    result_dict["json_data"] = drz if drz else None
 
 
 class TranscriptionJob:

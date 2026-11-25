@@ -180,7 +180,12 @@ def _ends_with(text: str, marks: tuple) -> bool:
 
 
 def split_ranges(
-    words: list, max_chars: int, pause: float, _lo: int = 0, _hi: Optional[int] = None
+    words: list,
+    max_chars: int,
+    pause: float,
+    max_seconds: float = float("inf"),
+    _lo: int = 0,
+    _hi: Optional[int] = None,
 ) -> list:
     """
     Cut a segment's words into (first, last + 1) index ranges, for captions.
@@ -189,7 +194,8 @@ def split_ranges(
     A piece still longer than ``max_chars`` is cut in two at the best word
     boundary near its middle: one after a sentence end, then a comma, then a
     longer pause, over a cut that merely lands on the middle. Pieces are cut
-    again until they fit, or have no boundary left to cut at.
+    again until they fit, or have no boundary left to cut at. ``max_seconds``
+    limits a piece the same way, from its first word to its last.
     """
 
     hi = len(words) if _hi is None else _hi
@@ -204,14 +210,18 @@ def split_ranges(
         ranges = []
 
         for a, b in zip(bounds, bounds[1:]):
-            ranges.extend(split_ranges(words, max_chars, float("inf"), a, b))
+            ranges.extend(
+                split_ranges(words, max_chars, float("inf"), max_seconds, a, b)
+            )
 
         return ranges
 
     sizes = [len(word["t"]) + 1 for word in words[_lo:hi]]
     total = sum(sizes)
 
-    if total - 1 <= max_chars or hi - _lo < 2:
+    seconds = words[hi - 1]["e"] - words[_lo]["s"] if hi > _lo else 0.0
+
+    if (total - 1 <= max_chars and seconds <= max_seconds) or hi - _lo < 2:
         return [(_lo, hi)]
 
     best = None
@@ -243,6 +253,6 @@ def split_ranges(
 
     # A pause was already handled above, so recursion here only has the
     # length to deal with.
-    return split_ranges(words, max_chars, float("inf"), _lo, best[1]) + split_ranges(
-        words, max_chars, float("inf"), best[1], hi
-    )
+    return split_ranges(
+        words, max_chars, float("inf"), max_seconds, _lo, best[1]
+    ) + split_ranges(words, max_chars, float("inf"), max_seconds, best[1], hi)

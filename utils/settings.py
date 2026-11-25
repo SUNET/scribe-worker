@@ -88,15 +88,27 @@ class Settings(BaseSettings):
     # when the silence between them is shorter than this, in seconds.
     SUBTITLE_MERGE_GAP: float = 1.8
 
-    # Subtitle timing, in seconds. A cue starts SUBTITLE_LEAD_IN before its
-    # first word and stays up SUBTITLE_LEAD_OUT after its last. It is held at
-    # least SUBTITLE_MIN_DURATION, and long enough to read at SUBTITLE_MAX_CPS
-    # characters per second, when the next cue leaves room. Consecutive cues
-    # are kept SUBTITLE_MIN_GAP apart.
+    # Start each line with SUBTITLE_SPEAKER_DASH when the two lines of a cue
+    # are said by different speakers. This needs diarization, which a job
+    # that asks for a transcript runs anyway; for the others it is an extra
+    # step, skipped when the job says there is a single speaker. If it fails,
+    # the subtitles are made without dashes. Turn off to skip it.
+    SUBTITLE_SPEAKER_DASHES: bool = True
+    SUBTITLE_SPEAKER_DASH: str = "- "
+
+    # Subtitle timing, in seconds. The defaults follow the Netflix timed text
+    # style guide: 20 characters per second for adults, a cue between 5/6 s
+    # and 7 s, and 2 frames (at 24 fps) between cues. A cue starts
+    # SUBTITLE_LEAD_IN before its first word and stays up SUBTITLE_LEAD_OUT
+    # after its last. It is held at least SUBTITLE_MIN_DURATION, and long
+    # enough to read at SUBTITLE_MAX_CPS when the next cue leaves room, but
+    # never past SUBTITLE_MAX_DURATION. Consecutive cues are kept
+    # SUBTITLE_MIN_GAP apart.
     SUBTITLE_LEAD_IN: float = 0.1
     SUBTITLE_LEAD_OUT: float = 0.3
-    SUBTITLE_MIN_DURATION: float = 1.0
-    SUBTITLE_MAX_CPS: float = 17.0
+    SUBTITLE_MIN_DURATION: float = 0.833
+    SUBTITLE_MAX_CPS: float = 20.0
+    SUBTITLE_MAX_DURATION: float = 7.0
     SUBTITLE_MIN_GAP: float = 0.08
 
     # SSL configuration
