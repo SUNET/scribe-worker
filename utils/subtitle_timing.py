@@ -113,4 +113,50 @@ def retime(cues: list) -> list:
         retimed.append(cue._replace(start=new_start, end=new_end))
         previous_end = new_end
 
-    return retimed
+    return _borrow_time(cues, retimed)
+
+
+def _borrow_time(raw: list, cues: list) -> list:
+    """
+    Give a cue that is still read too fast the time it needs by starting it
+    earlier, up to SUBTITLE_MAX_EARLY before its first word. The silence
+    before it is used first. Beyond that the cue before it gives up time it
+    does not need: it keeps its own words, its minimum duration and the time
+    to read it, nothing more.
+
+    Extending the end is not an option here: retime has already done that as
+    far as the next cue allows.
+    """
+
+    cues = list(cues)
+    gap = settings.SUBTITLE_MIN_GAP
+
+    for index, cue in enumerate(cues):
+        needed = characters(cue.caption) / settings.SUBTITLE_MAX_CPS
+        wanted_start = cue.end - needed
+
+        if wanted_start >= cue.start - 1e-9:
+            continue
+
+        floor = max(0.0, raw[index].start - settings.SUBTITLE_MAX_EARLY)
+        previous = cues[index - 1] if index else None
+
+        if previous is not None:
+            # What the cue before cannot do without.
+            keeps = max(
+                raw[index - 1].end,
+                previous.start + settings.SUBTITLE_MIN_DURATION,
+                previous.start + characters(previous.caption) / settings.SUBTITLE_MAX_CPS,
+            )
+            floor = max(floor, keeps + gap)
+
+        # Not later than it already is, and not past the longest cue.
+        new_start = max(wanted_start, floor, cue.end - settings.SUBTITLE_MAX_DURATION)
+        new_start = min(new_start, cue.start)
+
+        if previous is not None and new_start < previous.end + gap:
+            cues[index - 1] = previous._replace(end=new_start - gap)
+
+        cues[index] = cue._replace(start=new_start)
+
+    return cues

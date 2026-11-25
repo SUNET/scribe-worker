@@ -143,13 +143,27 @@ def build_cues(chunks: list) -> list:
         text_words = text.split(" ")
 
         if words and len(words) == len(text_words):
-            for first, last in split_ranges(words, capacity, float("inf"), seconds):
-                pieces.append(
+            # Eighty-odd characters can be too much for two lines even though
+            # they would fit by count: a long word leaves no good place for
+            # the break. Cut shorter until every piece wraps to fit.
+            limit = capacity
+
+            while True:
+                ranges = split_ranges(words, limit, float("inf"), seconds)
+                pieces = [
                     (
                         *_span(chunk, words[first:last]),
                         " ".join(text_words[first:last]),
                     )
-                )
+                    for first, last in ranges
+                ]
+
+                if limit <= settings.SUBTITLE_LINE_LENGTH or all(
+                    _fits(piece[2]) for piece in pieces
+                ):
+                    break
+
+                limit -= 4
         else:
             pieces = _split_plain(
                 chunk["start"], chunk["end"], text, capacity, seconds
@@ -221,6 +235,18 @@ def merge_cues(cues: list) -> list:
         index += 1
 
     return merged
+
+
+def _fits(text: str) -> bool:
+    """
+    Whether the text wraps to at most LINES lines that are not too long.
+    """
+
+    lines = wrap_caption(text, settings.SUBTITLE_LINE_LENGTH).split("\n")
+
+    return len(lines) <= LINES and all(
+        len(line) <= settings.SUBTITLE_LINE_LENGTH for line in lines
+    )
 
 
 def _span(chunk: dict, words: list) -> tuple:

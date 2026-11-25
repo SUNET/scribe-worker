@@ -113,6 +113,11 @@ class Settings(BaseSettings):
     SUBTITLE_MAX_DURATION: float = 7.0
     SUBTITLE_MIN_GAP: float = 0.08
 
+    # How far before its first word a cue may start when that is the only way
+    # to give it time to read (SUBTITLE_MAX_CPS), in seconds. Beyond
+    # SUBTITLE_LEAD_IN this is a compromise between sync and reading speed.
+    SUBTITLE_MAX_EARLY: float = 0.4
+
     # SSL configuration
     SSL_CERTFILE: str = ""
     SSL_KEYFILE: str = ""

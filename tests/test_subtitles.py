@@ -123,3 +123,25 @@ def test_cue_is_held_long_enough_to_read():
 def test_too_fast_when_next_cue_is_in_the_way():
     cues = [Cue(1.0, 1.5, "x" * 40), Cue(1.6, 3.0, "ok")]
     assert too_fast(retime(cues))
+
+
+def test_start_earlier_when_next_cue_blocks_the_end():
+    # 29 characters need 1.61 s at 18 characters per second; only 1.5 s is
+    # there between the words and the next cue.
+    cues = [Cue(10.0, 11.5, "x" * 29), Cue(11.6, 13.0, "ok")]
+    [first, _] = retime(cues)
+    assert not too_fast([first])
+    assert first.start >= 10.0 - settings.SUBTITLE_MAX_EARLY - 1e-9
+
+
+def test_borrowed_start_keeps_the_gap_to_the_cue_before():
+    cues = [Cue(0.0, 1.0, "hej"), Cue(1.1, 2.6, "x" * 29)]
+    first, second = retime(cues)
+    assert second.start - first.end >= settings.SUBTITLE_MIN_GAP - 1e-9
+    assert first.end > first.start
+
+
+def test_long_words_never_overflow_a_line():
+    text = " ".join(["Sammanfattningsvis"] * 4 + ["ja"] * 3)
+    for _, _, caption, _ in build_cues([chunk(text)]):
+        assert all(len(line) <= LINE for line in caption.split("\n"))
