@@ -1,0 +1,26 @@
+services:
+  scribe-worker:
+    build: .
+    image: scribe-worker
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Overrides .env. Uncomment once the models are downloaded.
+      # HF_HUB_OFFLINE: "1"
+      WORKERS: ${WORKERS:-2}
+    volumes:
+      - scribe-data:/data
+      # Client certificate for the backend, if it needs one. Point SSL_CERTFILE
+      # and SSL_KEYFILE in .env at /certs/...
+      # - ./certs:/certs:ro
+    # GPU access needs the NVIDIA Container Toolkit on the host.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  scribe-data:

@@ -41,6 +41,8 @@ Contributions are welcome! Please feel free to open issues or submit pull reques
 - git, because `nemo-toolkit` is installed from a pinned git commit (see `pyproject.toml`)
 - `libsndfile` (`libsndfile1` on Debian), used by NeMo
 
+The Debian/Ubuntu packages and how to install them are listed under [Docker](#packages-in-the-image).
+
 For GPU use in production (Linux):
 
 - An NVIDIA GPU with a working driver
@@ -179,14 +181,100 @@ from contacting Hugging Face at all.
 
 ## Docker
 
-Build and run with Docker:
+The image is based on `python:3.12-slim-bookworm`, runs as an unprivileged user and installs
+the dependencies with `uv sync --frozen`.
+
+### Build
 
 ```bash
 docker build -t scribe-worker .
-docker run --env-file .env scribe-worker
 ```
 
-The image installs `ffmpeg`, `git`, `gcc` and `libsndfile1`, which the dependencies above need.
+### Download the models
+
+Models go to `/data` in the container (`HF_HOME=/data/huggingface`), so keep it in a volume.
+Download them once, which needs `HF_TOKEN` in `.env` for the pyannote fallback:
+
+```bash
+docker run --rm --env-file .env -v scribe-data:/data scribe-worker python main.py --download
+```
+
+### Run
+
+```bash
+docker run -d --name scribe-worker --restart unless-stopped \
+    --gpus all --env-file .env -v scribe-data:/data scribe-worker
+```
+
+- `--gpus all` needs an NVIDIA driver on the host and the
+  [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
+  Without it the worker runs on the CPU, which is much slower. The CUDA libraries come with the
+  PyTorch wheels, so the image needs no CUDA base image.
+- `API_BACKEND_URL` in `.env` must be reachable from inside the container. `localhost` is the
+  container itself, so use the host name of the backend (or `host.docker.internal`).
+- If the backend needs a client certificate, mount it and point `SSL_CERTFILE` and
+  `SSL_KEYFILE` at the mounted paths, for example `-v ./certs:/certs:ro`.
+- After the models are downloaded, add `-e HF_HUB_OFFLINE=1` to stop all contact with
+  Hugging Face.
+
+### Environment variables
+
+The settings in `utils/settings.py` can be given as real environment variables, which take
+priority over a `.env` file. `.env` is not in the image (see `.dockerignore`), so pass the
+settings when the container starts:
+
+- `--env-file .env` (as above), or `-e NAME=value` for single values, for example
+  `-e WORKERS=1`.
+- `docker run --env-file` does **not** strip quotes, so `API_BACKEND_URL="http://backend:8000"`
+  would keep the quotes in the value. Leave them out in a file used this way:
+
+  ```env
+  API_BACKEND_URL=http://backend:8000
+  WORKERS=2
+  HF_TOKEN=<token>
+  ```
+
+- Alternatively mount the file, which the worker reads itself, so quotes work:
+  `-v ./.env:/app/.env:ro`.
+- Paths such as `SSL_CERTFILE` and `SSL_KEYFILE` are paths inside the container, so mount the
+  files and use the mounted paths.
+- `HF_TOKEN` shows up in `docker inspect` when given as a variable. Use a mounted `.env` or
+  Docker secrets if that matters.
+
+### Docker Compose
+
+`compose.yaml` does the same as the `docker run` commands above, with the GPU, the `/data`
+volume and `.env` configured (Compose handles quoted values in `env_file`):
+
+```bash
+docker compose build
+docker compose run --rm scribe-worker python main.py --download   # once
+docker compose up -d
+docker compose logs -f
+```
+
+### Packages in the image
+
+The same packages are needed to run the worker outside Docker, on Debian or Ubuntu:
+
+| Package | Why |
+|---|---|
+| `ffmpeg` | Audio and video processing |
+| `git` | `nemo-toolkit` is installed from a pinned git commit |
+| `gcc` | Triton compiles NeMo's attention layer at the first diarization |
+| `python3.12-dev` | `Python.h`, needed together with `gcc`. Already in the official `python` image, so the Dockerfile does not install it |
+| `libsndfile1` | Audio file I/O for NeMo |
+| `curl`, `ca-certificates` | Downloads |
+
+```bash
+sudo apt-get update
+sudo apt-get install -y --no-install-recommends \
+    ca-certificates curl ffmpeg gcc git libsndfile1 python3.12-dev
+```
+
+`python3.12-dev` is only in the default repositories of Ubuntu 24.04 and Debian 13. On older
+releases use the `deadsnakes` PPA (Ubuntu) or a Python 3.12 build from `uv python install 3.12`
+(which already includes the headers).
 
 ## Project Structure
 
