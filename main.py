@@ -254,6 +254,20 @@ def download_diarization_models() -> None:
         )
 
 
+def download_vad_model() -> None:
+    """
+    Download the Silero VAD model that whisper-timestamped uses (vad=True). It
+    comes from GitHub through torch.hub, into $TORCH_HOME/hub (by default
+    ~/.cache/torch/hub), and not from Hugging Face. Running the library's own
+    loader on a second of silence puts it exactly where a job looks for it.
+    """
+    from whisper_timestamped.transcribe import get_vad_segments
+
+    print("Downloading the Silero VAD model (snakers4/silero-vad)...")
+    get_vad_segments(torch.zeros(16000), method="silero")
+    print("  Done.")
+
+
 def download_models() -> None:
     """Download all configured whisper models."""
     if settings.HF_TOKEN:
@@ -295,6 +309,7 @@ def download_models() -> None:
 
         print("  Done.")
 
+    download_vad_model()
     download_diarization_models()
 
     print("\nAll models downloaded.")
