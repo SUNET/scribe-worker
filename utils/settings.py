@@ -116,7 +116,13 @@ class Settings(BaseSettings):
     # How far before its first word a cue may start when that is the only way
     # to give it time to read (SUBTITLE_MAX_CPS), in seconds. Beyond
     # SUBTITLE_LEAD_IN this is a compromise between sync and reading speed.
-    SUBTITLE_MAX_EARLY: float = 0.4
+    SUBTITLE_MAX_EARLY: float = 0.2
+
+    # whisper-timestamped marks a word as starting before the audio does, by
+    # about 0.1 s on average. Every word start is moved this much later (never
+    # past the end of the word), which corrects the word timings and so the
+    # subtitles built from them.
+    WORD_START_SHIFT: float = 0.1
 
     # SSL configuration
     SSL_CERTFILE: str = ""

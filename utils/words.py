@@ -42,6 +42,8 @@ This format is additive. Older consumers never request it and are unaffected.
 
 from typing import Any, Optional
 
+from utils.settings import get_settings
+
 # Bump when the payload shape changes incompatibly. Consumers must treat an
 # unknown version as "no word data" rather than guessing. Deliberately not a
 # setting: a deployment claiming to speak a version the code does not
@@ -77,10 +79,13 @@ def normalize_word(word: Any) -> Optional[dict]:
         return None
 
     try:
+        start, end = float(start), float(end)
+        # Word starts come out early; see WORD_START_SHIFT.
+        start = min(start + get_settings().WORD_START_SHIFT, max(start, end))
         entry = {
             "t": text,
-            "s": round(float(start), TIME_PRECISION),
-            "e": round(float(end), TIME_PRECISION),
+            "s": round(start, TIME_PRECISION),
+            "e": round(end, TIME_PRECISION),
         }
     except (TypeError, ValueError):
         return None
