@@ -71,15 +71,19 @@ uv run main.py --download
 ```
 
 This downloads every Whisper model configured in `utils/settings.py` (`WHISPER_MODELS_HF`),
-and the two diarization models (`NEMOTRON_MODEL` and `PYANNOTE_MODEL` in the same file):
+the Silero VAD model, and the two diarization models (`NEMOTRON_MODEL` and `PYANNOTE_MODEL` in
+the same file):
 
+- Silero VAD (about 2 MB), which Whisper uses to find speech. It is not on Hugging Face:
+  `torch.hub` downloads it from GitHub (`snakers4/silero-vad`, the `master` branch) into
+  `$TORCH_HOME/hub`, by default `~/.cache/torch/hub`.
 - Nemotron 3 Diarization (about 200 MB, no token needed).
 - The pyannote pipeline used by the fallback (about 30 MB). It is gated, so it needs `HF_TOKEN`
   with the licence accepted. Without one it is skipped with a message and the rest still
   downloads; a job that needs the fallback will then fail until it is downloaded.
 
 After this the worker can run with `HF_HUB_OFFLINE=1`, and the first job does not wait for a
-download.
+download. Silero VAD is then loaded from `$TORCH_HOME` without contacting GitHub.
 
 `download_models.sh` is left over from an earlier whisper.cpp setup and is not used by the
 worker.
@@ -165,7 +169,7 @@ the value it has. They come from a few real recordings and may need tuning on ot
 ### Privacy
 
 Audio and transcripts stay on the worker. Only the backend API is contacted with them, and the
-models are downloaded from Hugging Face. The telemetry of the libraries involved is switched
+models are downloaded from Hugging Face, and the Silero VAD model from GitHub. The telemetry of the libraries involved is switched
 off in the code (Hugging Face, NeMo and pyannote; pyannote's is on by default and reports the
 audio duration). Once the models have been downloaded, `HF_HUB_OFFLINE=1` stops the worker
 from contacting Hugging Face at all.
@@ -192,7 +196,8 @@ docker build -t scribe-worker .
 
 ### Download the models
 
-Models go to `/data` in the container (`HF_HOME=/data/huggingface`), so keep it in a volume.
+Models go to `/data` in the container (`HF_HOME=/data/huggingface` for the Hugging Face models
+and `TORCH_HOME=/data/torch` for Silero VAD), so keep it in a volume.
 Download them once, which needs `HF_TOKEN` in `.env` for the pyannote fallback:
 
 ```bash

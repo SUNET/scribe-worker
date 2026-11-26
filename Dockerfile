@@ -22,7 +22,8 @@ RUN apt-get update && \
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 # Unprivileged user. /data holds everything that should survive a restart:
-# the Hugging Face model cache and the Triton kernel cache.
+# the Hugging Face and torch.hub (Silero VAD) model caches and the Triton
+# kernel cache.
 RUN useradd --create-home --uid 1000 worker && \
 	mkdir -p /app /data && \
 	chown worker:worker /app /data
@@ -36,6 +37,7 @@ ENV UV_COMPILE_BYTECODE=1 \
 	PATH="/app/.venv/bin:$PATH" \
 	PYTHONUNBUFFERED=1 \
 	HF_HOME=/data/huggingface \
+	TORCH_HOME=/data/torch \
 	TRITON_CACHE_DIR=/data/triton
 
 # Copy dependency files first for better caching
